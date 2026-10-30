@@ -3654,8 +3654,10 @@ name = "lightcraft-denoise"
 version = "0.15.0"
 dependencies = [
  "faer-core",
+ "lightcraft-coreml",
  "lightcraft-denoise-core",
  "lightcraft-raster",
+ "lightcraft-testkit",
  "miniz_oxide 0.9.1",
  "proptest",
  "rayon",
