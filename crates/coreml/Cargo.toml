@@ -1,0 +1,32 @@
+[package]
+name = "lightcraft-coreml"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LightCraft Core ML (L0): runs a compiled Core ML model on the CPU, GPU or Neural Engine (macOS). With lightcraft-sysmem, the workspace's only crate allowed `unsafe`."
+
+# Opts out of the workspace lints only to keep `unsafe_code = "deny"` overridable for the one module that calls
+# Core ML (`src/macos.rs`); every other file is safe code. See AGENTS.md and craftrules standards/never-crash.md
+# ("isolated helper library crate").
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+cognitive_complexity = "deny"
+too_many_arguments = "deny"
+wildcard_imports = "deny"
+dbg_macro = "warn"
+todo = "warn"
+
+[dependencies]
+thiserror = { workspace = true }
+
+# Pure-Rust bindings to Apple's Core ML framework (the framework is the system's, like Metal under wgpu).
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = { workspace = true }
+objc2 = { workspace = true }
+objc2-core-ml = { workspace = true }
+objc2-foundation = { workspace = true, features = ["NSArray", "NSDictionary", "NSError", "NSString", "NSURL", "NSValue"] }
+
+[dev-dependencies]
+lightcraft-testkit = { workspace = true }
