@@ -181,6 +181,10 @@ fn a_tile_the_card_gets_wrong_is_run_on_the_processor_and_three_stop_the_card() 
         last_threads: AtomicUsize::new(0),
         remote: None,
         local_card: AtomicBool::new(true),
+        local_ane: AtomicBool::new(false),
+        ane: OnceLock::new(),
+        sha256: OnceLock::new(),
+        ane_fallbacks: AtomicUsize::new(0),
     };
     let (input, _) = lightcraft_denoise::runtime::test_tile(64);
     let want = cpu.run(&input).unwrap();
@@ -211,6 +215,10 @@ fn a_slow_card_is_left_out_unless_it_is_chosen() {
         last_threads: AtomicUsize::new(0),
         remote: None,
         local_card: AtomicBool::new(true),
+        local_ane: AtomicBool::new(false),
+        ane: OnceLock::new(),
+        sha256: OnceLock::new(),
+        ane_fallbacks: AtomicUsize::new(0),
     };
     assert_eq!(model.runner(RunOn::Auto, 16).1, 16, "sixteen threads beat it");
     let device = model.device(RunOn::Auto);

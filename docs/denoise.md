@@ -85,8 +85,61 @@ The GPU executor uses our WGSL kernels through wgpu. It checks a real model's ou
 against the CPU and falls back on errors, unsupported networks or a slower device.
 Setup has a time limit and a crash marker. Automatic selection estimates throughput
 from a check tile; this estimate can choose imperfectly on unmeasured hardware.
-Settings offers Automatic, Graphics card and Processor. GPU tests cover supported
-synthetic networks against the scalar executor; a real-model test compares CPU/GPU.
+Settings offers Automatic, Graphics card, Processor and (Apple silicon) Neural Engine. GPU tests cover
+supported synthetic networks against the scalar executor; a real-model test compares CPU/GPU.
+
+### The Neural Engine (Apple silicon)
+
+Core ML is the only way to reach Apple's Neural Engine; wgpu and Metal never do, so the GPU path above leaves it
+idle (0 mW in `powermetrics`). `crates/coreml` (`lightcraft-coreml`, the second crate allowed `unsafe`, in one
+file) compiles and runs a Core ML model; Core ML decides per layer where it really runs, and only allows the
+Neural Engine (`CPUAndNeuralEngine`), never the graphics card.
+
+Core ML takes no ONNX file and the Neural Engine computes in 16-bit floats (largest value 65504), so the installed
+model is rewritten on this computer (`lightcraft_denoise::coreml`, pure Rust, no Python):
+
+1. The activations' reach is measured on the check tile on the CPU. RawNIND's reach 10⁶ and its answer is a million
+   times the input, which came back as NaN from 16-bit arithmetic.
+2. Each layer's weights and bias absorb an exact power-of-two factor that keeps its activations at 1024 or below (a
+   factor 64 below the limit, for brighter or noisier tiles than the check tile). Convolutions are linear, and a
+   leaky ReLU or a maximum commutes with a positive factor, so this changes nothing but the scale of the answer,
+   which the runner multiplies back (RawNIND's comes out 2⁻¹¹ smaller): `Gain::MatchMean` and the rest of the
+   pipeline never see it. A test checks this against the CPU reference.
+3. The network is written as a Core ML `NeuralNetwork` model, compiled by Core ML and kept in
+   `<model folder>/coreml/<model hash>-t<tile>-v<writer>/` (`net.mlmodelc` and `scale`). A kept model that does not
+   load is made again.
+
+Setting it up works like the graphics card's (first photo that may use it, own thread, 60 s limit, `ane-setup.marker`
+beside the model while it runs, a check tile compared with the CPU's answer and timed): the answer may differ from the
+CPU's by up to 2 % of its largest value (measured: 3×10⁻³ on RawNIND's model), a tile it gets wrong or cannot run goes to
+the CPU, and three wrong tiles stop it. **Automatic** tries the Neural Engine first and uses it where its check tile
+is faster than the processor's at the pace the photo runs at, and than the card's when that was measured; **Neural
+Engine** uses it whenever it can (and otherwise behaves as Automatic); choosing where denoise runs again lets a
+failed set-up or a crash be tried again. `LIGHTCRAFT_GPU=0` and `LIGHTCRAFT_GPU_BACKEND=off` keep it off too, like the
+graphics card. `denoise.status` → `device` says `ane` with `aneMs` and `cpuMs`;
+`denoise.models.list` → `neuralEngine` says whether this computer can have one.
+
+Measured on an Apple A18 Pro (8 GB, macOS 26.7), RawNIND UtNet2 (Bayer), one 512-cell tile, warm
+(`LC_DENOISE_MODEL=<model.onnx>`):
+
+| Where | One tile |
+|---|---:|
+| CPU, one core (our faer executor) | 1621 ms |
+| Graphics card (our WGSL kernels, fp32) | 238 ms |
+| Core ML, CPU + GPU (fp16) | 66 ms |
+| Core ML, **Neural Engine** (fp16) | **7.8 ms** |
+
+`powermetrics --samplers cpu_power,gpu_power,ane_power` while tiles ran in a loop: ANE 3.4–4.4 W, GPU about 10 mW,
+CPU about 0.7 W (before: ANE 0 mW, and the graphics card at up to 7.5 W for the longer run). The Neural Engine draws
+power too; energy per photo is that times the (much shorter) time, to be measured per photo, not assumed.
+
+```text
+LC_DENOISE_MODEL=<model.onnx> cargo test --release -p lightcraft-gpu --features denoise --lib real_model -- --ignored --nocapture
+LC_DENOISE_MODEL=<model.onnx> LC_COREML_LOOP_SECS=22 cargo test --release -p lightcraft-denoise --features runtime --lib coreml::core_ml_tests::the_real_model -- --nocapture
+```
+
+The second one prints the tile time and the difference from the CPU, and with `LC_COREML_LOOP_SECS` keeps the
+Neural Engine busy that long for `powermetrics`. The Settings text for the new choice is English until translated.
 
 The convolution kernel stores its shared input tile as scalar elements, each with
 one writer, and gathers vectors after a workgroup barrier. Writing separate lanes

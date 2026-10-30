@@ -23,6 +23,9 @@ pub(super) const GPU_MAX_FALLBACKS: usize = 3;
 /// The file beside a model while the graphics card is set up for it (see [`set_up_card`]).
 pub(crate) const GPU_SETUP_MARKER: &str = "gpu-setup.marker";
 
+/// The file beside a model while the Neural Engine is set up for it (the same guard, see `ane.rs`).
+pub(crate) const ANE_SETUP_MARKER: &str = "ane-setup.marker";
+
 /// Why the card is not tried when a set-up marker is found.
 #[cfg(feature = "denoise")]
 pub(super) const GPU_CRASHED: &str = "LightCraft closed while it was setting up the graphics card for AI Denoise last time";
@@ -107,7 +110,7 @@ pub(super) fn set_up_card<T: Send + 'static, R>(
 /// The card's time for one tile once it is warm: the fastest of up to three runs, stopping after about two seconds (a
 /// slow card is slow enough to tell at once).
 #[cfg(feature = "denoise")]
-fn card_tile_ms(runner: &dyn TileRunner, input: &[f32]) -> f64 {
+pub(super) fn card_tile_ms(runner: &dyn TileRunner, input: &[f32]) -> f64 {
     if runner.run(input).is_err() {
         return f64::INFINITY;
     }

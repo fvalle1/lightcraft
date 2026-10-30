@@ -1,4 +1,6 @@
 #[cfg(feature = "denoise")]
+use super::ane::{self, ANE_MAX_FALLBACKS, ANE_NAME, ANE_PARALLEL, AneSide, make_ane};
+#[cfg(feature = "denoise")]
 use super::gpu::{GPU_CRASHED, GPU_MAX_FALLBACKS, GPU_PARALLEL, GPU_SLOW, GPU_STUCK, card_is_faster, make_gpu};
 #[cfg(feature = "denoise")]
 use super::settings::{installed_models, read_settings};
@@ -16,22 +18,26 @@ pub(super) const STACK: usize = 16 << 20;
 /// Where the model runs (Settings ▸ AI Denoise ▸ Speed; `denoise.settings {runOn}`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RunOn {
-    /// The graphics card where it is faster than the processor at the pace the work goes at (both are timed on this
-    /// computer when the card is set up), else the processor.
+    /// The Neural Engine (Apple silicon) or the graphics card where it is faster than the processor at the pace the
+    /// work goes at (each is timed on this computer when it is set up), else the processor.
     #[default]
     Auto,
     /// The graphics card whenever it can run the model, even where the processor would be faster.
     Gpu,
+    /// The Neural Engine whenever it can run the model (16-bit arithmetic: tiles differ from the processor's by a few
+    /// thousandths of the largest value); where it cannot, as Automatic.
+    Ane,
     /// Always the processor.
     Cpu,
 }
 
 impl RunOn {
-    /// `auto`, `gpu` or `cpu`.
+    /// `auto`, `gpu`, `ane` or `cpu`.
     pub fn parse(name: &str) -> Option<RunOn> {
         match name {
             "auto" => Some(RunOn::Auto),
             "gpu" => Some(RunOn::Gpu),
+            "ane" => Some(RunOn::Ane),
             "cpu" => Some(RunOn::Cpu),
             _ => None,
         }
@@ -41,9 +47,16 @@ impl RunOn {
         match self {
             RunOn::Auto => "auto",
             RunOn::Gpu => "gpu",
+            RunOn::Ane => "ane",
             RunOn::Cpu => "cpu",
         }
     }
+}
+
+/// Whether the Neural Engine can be used at all in this build, on this computer (`denoise.models.list` →
+/// `neuralEngine`; the Settings choice shows only then).
+pub fn neural_engine_possible() -> bool {
+    cfg!(feature = "denoise") && cfg!(all(target_os = "macos", target_arch = "aarch64"))
 }
 
 /// A loaded denoise model: what runs tiles, and a self-check.
@@ -72,7 +85,7 @@ pub(crate) type Loader = Arc<dyn Fn(&Path, &DenoiserManifest) -> Result<Arc<dyn 
 /// A set-up that may work another time (a crash, the time limit), unlike one the card or the model cannot do.
 #[cfg(feature = "denoise")]
 pub(super) fn worth_retrying(why: &str) -> bool {
-    why == GPU_CRASHED || why == GPU_STUCK || why.starts_with(GPU_SLOW)
+    why == GPU_CRASHED || why == GPU_STUCK || why.starts_with(GPU_SLOW) || ane::worth_retrying(why)
 }
 
 /// The model on our pure-Rust CPU runner, and on the graphics card when there is one that can run it: the card is set up for the
@@ -84,6 +97,12 @@ pub(super) struct Network {
     pub(super) path: PathBuf,
     pub(super) tile: usize,
     pub(super) gpu: OnceLock<Result<GpuSide, String>>,
+    /// The Neural Engine, set up for the first photo that may use it (Apple silicon; see `ane.rs`).
+    pub(super) ane: OnceLock<Result<AneSide, String>>,
+    /// The model file's hash, which names the Core ML model kept for it (computed when the Neural Engine is set up).
+    pub(super) sha256: OnceLock<String>,
+    /// Tiles the Neural Engine got wrong (an error, numbers that are not finite) and the CPU ran.
+    pub(super) ane_fallbacks: AtomicUsize,
     /// Tiles the card got wrong (an error, numbers that are not finite) and the CPU ran.
     pub(super) fallbacks: AtomicUsize,
     /// Tiles at once of the photo started last (0: none yet), to say where the work runs.
@@ -94,6 +113,8 @@ pub(super) struct Network {
     pub(super) remote: Option<RemoteSide>,
     /// Whether this computer's share runs on the card (else the CPU), as chosen for the photo started last.
     pub(super) local_card: AtomicBool,
+    /// Whether this computer's share runs on the Neural Engine, as chosen for the photo started last.
+    pub(super) local_ane: AtomicBool,
 }
 
 #[cfg(feature = "denoise")]
@@ -222,16 +243,86 @@ impl Network {
         Ok(g)
     }
 
-    /// The card, when a photo made `threads` tiles at a time under `run_on` runs on it; else why the CPU does.
+    /// The card, when a photo made `threads` tiles at a time under `run_on` runs on it; else why the CPU does. The
+    /// Neural Engine's choice falls back to what Automatic would do.
     fn choose(&self, run_on: RunOn, threads: usize, start: bool) -> Result<&GpuSide, String> {
         if run_on == RunOn::Cpu {
             return Err("the processor is chosen in Settings".into());
         }
         let g = self.card(start)?;
-        if run_on == RunOn::Auto && !card_is_faster(g.card_ms, g.cpu_ms, threads) {
+        if run_on != RunOn::Gpu && !card_is_faster(g.card_ms, g.cpu_ms, threads) {
             return Err(format!("it is faster than {} on this computer", g.adapter));
         }
         Ok(g)
+    }
+
+    /// The Neural Engine when it can be used now, else why not. `start` sets it up when that has not been tried yet.
+    fn ane(&self, start: bool) -> Result<&AneSide, String> {
+        let side = if start {
+            Some(self.ane.get_or_init(|| {
+                let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let sha256 = match self.sha256.get() {
+                        Some(h) => h.clone(),
+                        None => {
+                            let h = lightcraft_denoise::hash::sha256_file(&self.path).map_err(|e| format!("{}: {e}", self.path.display()))?;
+                            self.sha256.get_or_init(|| h).clone()
+                        }
+                    };
+                    make_ane(&self.cpu, &self.path, &sha256, self.tile)
+                }))
+                .unwrap_or_else(|_| Err("the Neural Engine runner gave up".into()));
+                if let Err(why) = &made {
+                    log::info!("denoise: not running on the Neural Engine ({why})");
+                }
+                made
+            }))
+        } else {
+            self.ane.get()
+        };
+        let a = match side {
+            None => return Err("the Neural Engine is not set up yet".into()),
+            Some(Err(why)) => return Err(why.clone()),
+            Some(Ok(a)) => a,
+        };
+        if self.ane_fallbacks.load(Ordering::Relaxed) >= ANE_MAX_FALLBACKS {
+            return Err(format!("the Neural Engine got {ANE_MAX_FALLBACKS} tiles wrong"));
+        }
+        Ok(a)
+    }
+
+    /// The Neural Engine, when a photo made `threads` tiles at a time under `run_on` runs on it; else why not.
+    /// Automatic uses it where it is faster than the processor (and than the card, once that is known to be faster).
+    fn choose_ane(&self, run_on: RunOn, threads: usize, start: bool) -> Result<&AneSide, String> {
+        if !matches!(run_on, RunOn::Auto | RunOn::Ane) {
+            return Err("it is not chosen in Settings".into());
+        }
+        if !ane::possible() {
+            return Err("this computer has no Neural Engine".into());
+        }
+        if let Some(why) = ane::switched_off() {
+            return Err(why.into());
+        }
+        let a = self.ane(start)?;
+        if run_on == RunOn::Auto {
+            if !card_is_faster(a.ane_ms, a.cpu_ms, threads) {
+                return Err(format!("it is faster than the {ANE_NAME} on this computer"));
+            }
+            if let Some(Ok(g)) = self.gpu.get()
+                && g.card_ms < a.ane_ms
+            {
+                return Err(format!("{} is faster than the {ANE_NAME}", g.adapter));
+            }
+        }
+        Ok(a)
+    }
+
+    fn ane_fell_back(&self, why: &str) {
+        let n = self.ane_fallbacks.fetch_add(1, Ordering::Relaxed) + 1;
+        if n == 1 {
+            log::warn!("denoise: a tile came back wrong from the Neural Engine ({why}); the CPU runs it");
+        } else if n == ANE_MAX_FALLBACKS {
+            log::warn!("denoise: the Neural Engine got {n} tiles wrong; the CPU does the rest");
+        }
     }
 
     fn fell_back(&self, why: &str) {
@@ -253,6 +344,16 @@ impl TileRunner for Network {
             && let Some(Ok(out)) = remote.try_run(input)
         {
             return Ok(out);
+        }
+        if self.local_ane.load(Ordering::Relaxed) {
+            if let Ok(a) = self.ane(false) {
+                match a.runner.run(input) {
+                    Ok(out) if out.iter().all(|v| v.is_finite()) => return Ok(out),
+                    Ok(_) => self.ane_fell_back("numbers that are not finite"),
+                    Err(e) => self.ane_fell_back(&e.to_string()),
+                }
+            }
+            return self.cpu.run(input);
         }
         if !self.local_card.load(Ordering::Relaxed) {
             return self.cpu.run(input);
@@ -276,17 +377,27 @@ impl Model for Network {
     fn runner(&self, run_on: RunOn, threads: usize) -> (&dyn TileRunner, usize) {
         let threads = threads.max(1);
         self.last_threads.store(threads, Ordering::Relaxed);
-        let (card, local) = match self.choose(run_on, threads, true) {
-            Ok(_) => (true, threads.min(GPU_PARALLEL)),
-            Err(_) => (false, threads),
+        // the Neural Engine first (Apple silicon); the graphics card is only set up when it is not used
+        let on_ane = self.choose_ane(run_on, threads, true).is_ok();
+        let on_card = !on_ane && self.choose(run_on, threads, true).is_ok();
+        let local = match (on_ane, on_card) {
+            (true, _) => threads.min(ANE_PARALLEL),
+            (_, true) => threads.min(GPU_PARALLEL),
+            _ => threads,
         };
+        let card = on_card;
+        self.local_ane.store(on_ane, Ordering::Relaxed);
         self.local_card.store(card, Ordering::Relaxed);
         if let Some(r) = &self.remote {
-            // this computer's time for a tile: the card's, or the CPU's with `threads` tiles sharing it (as
-            // `card_is_faster` counts them); unknown when the card was never set up (then the server is used)
-            let local_ms = match self.gpu.get() {
-                Some(Ok(g)) if card => g.card_ms,
-                Some(Ok(g)) => g.cpu_ms / (1.0 + 0.5 * threads.saturating_sub(1) as f64),
+            // this computer's time for a tile: the Neural Engine's or the card's, or the CPU's with `threads` tiles
+            // sharing it (as `card_is_faster` counts them); unknown when no device was ever set up (then the server
+            // is used)
+            let shared = |cpu_ms: f64| cpu_ms / (1.0 + 0.5 * threads.saturating_sub(1) as f64);
+            let local_ms = match (self.ane.get(), self.gpu.get()) {
+                (Some(Ok(a)), _) if on_ane => a.ane_ms,
+                (_, Some(Ok(g))) if card => g.card_ms,
+                (Some(Ok(a)), _) => shared(a.cpu_ms),
+                (_, Some(Ok(g))) => shared(g.cpu_ms),
                 _ => f64::INFINITY,
             };
             let share = match (r.usable(true), r.tile_ms()) {
@@ -306,7 +417,7 @@ impl Model for Network {
                 return (self, local + remote.slots());
             }
         }
-        if card { (self, local) } else { (&self.cpu, local) }
+        if on_ane || card { (self, local) } else { (&self.cpu, local) }
     }
 
     fn self_test(&self, run_on: RunOn) -> Result<Value, String> {
@@ -316,9 +427,12 @@ impl Model for Network {
             return Err(format!("the model failed its self-test: it does not {}", failed.join(", and does not ")));
         }
         let mut v = serde_json::to_value(&t).map_err(|e| e.to_string())?;
-        // the card is set up and checked here, so the test says where the work will run
+        // the devices are set up and checked here, so the test says where the work will run
         if run_on != RunOn::Cpu {
-            let _ = self.card(true);
+            let threads = Pace::Full.parallel(std::thread::available_parallelism().map_or(1, |n| n.get()), None);
+            if self.choose_ane(run_on, threads, true).is_err() {
+                let _ = self.card(true);
+            }
         }
         if let Some(o) = v.as_object_mut() {
             o.insert("device".into(), self.device(run_on));
@@ -327,13 +441,22 @@ impl Model for Network {
     }
 
     fn device(&self, run_on: RunOn) -> Value {
-        if run_on != RunOn::Cpu && self.gpu.get().is_none() {
-            return json!({"kind": "pending"});
-        }
         let threads = match self.last_threads.load(Ordering::Relaxed) {
             0 => Pace::Full.parallel(std::thread::available_parallelism().map_or(1, |n| n.get()), None),
             n => n,
         };
+        let ane = self.choose_ane(run_on, threads, false);
+        if let Ok(a) = &ane {
+            let mut v = json!({"kind": "ane", "adapter": ANE_NAME, "aneMs": a.ane_ms, "cpuMs": a.cpu_ms, "fellBack": self.ane_fallbacks.load(Ordering::Relaxed)});
+            if let (Some(r), Some(o)) = (&self.remote, v.as_object_mut()) {
+                o.insert("remote".into(), r.describe());
+            }
+            return v;
+        }
+        // nothing is set up yet: the first photo decides
+        if run_on != RunOn::Cpu && self.gpu.get().is_none() {
+            return json!({"kind": "pending"});
+        }
         let mut v = match self.choose(run_on, threads, false) {
             Ok(g) => json!({"kind": "gpu", "adapter": g.adapter}),
             // a set-up that crashed or ran out of time can be tried again (`denoise.settings {runOn}`)
@@ -384,6 +507,10 @@ pub(super) fn network(path: &Path, manifest: &DenoiserManifest, remote: Option<R
         path: path.to_path_buf(),
         tile: manifest.tile as usize,
         gpu: OnceLock::new(),
+        ane: OnceLock::new(),
+        sha256: OnceLock::new(),
+        ane_fallbacks: AtomicUsize::new(0),
+        local_ane: AtomicBool::new(false),
         fallbacks: AtomicUsize::new(0),
         last_threads: AtomicUsize::new(0),
     })
