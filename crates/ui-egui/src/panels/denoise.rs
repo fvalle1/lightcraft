@@ -354,8 +354,14 @@ fn speed_section(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, list: &
     }
     hint(ui, t, &device_line(&status["device"], run_on));
     if run_on != "cpu" && status["device"]["retry"] == true {
-        let r = ui.small_button(crate::i18n::tr("Try the graphics card again"));
-        register(ui, "denoise:retryGpu", r.rect);
+        // the choice that failed is the one offered again: the Neural Engine when it was chosen, else the card
+        let (label, id) = if run_on == "ane" {
+            ("Try the Neural Engine again", "denoise:retryNeuralEngine")
+        } else {
+            ("Try the graphics card again", "denoise:retryGpu")
+        };
+        let r = ui.small_button(crate::i18n::tr(label));
+        register(ui, id, r.rect);
         if r.clicked() {
             // choosing where it runs, even the same again, forgets the failed set-up
             let _ = app.run("denoise.settings", json!({"runOn": run_on}));
