@@ -589,6 +589,15 @@ mod core_ml_tests {
         }
         println!("Neural Engine: {best:.1} ms per tile, off by {worst:.2e} of the largest value");
         assert!(worst < 2e-2);
+        // `LC_COREML_LOOP_SECS=25`: keep the Neural Engine busy that long, to read its power with `powermetrics`
+        if let Some(secs) = std::env::var("LC_COREML_LOOP_SECS").ok().and_then(|v| v.parse::<f64>().ok()) {
+            let (started, mut tiles) = (std::time::Instant::now(), 0u32);
+            while started.elapsed().as_secs_f64() < secs.clamp(0.0, 600.0) {
+                model.predict(&[1, 4, tile, tile], &input).unwrap();
+                tiles += 1;
+            }
+            println!("{tiles} tiles in {:.1} s", started.elapsed().as_secs_f64());
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 }
