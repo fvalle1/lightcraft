@@ -354,9 +354,9 @@ fn speed_section(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, list: &
     }
     hint(ui, t, &device_line(&status["device"], run_on));
     if run_on != "cpu" && status["device"]["retry"] == true {
-        // the device that failed is the one offered again: the Neural Engine when it was chosen, or when its set-up is
-        // what failed under Automatic (the status carries its reason), else the card
-        let neural = run_on == "ane" || (run_on == "auto" && status["device"]["neuralEngineReason"].is_string());
+        // the device whose failure a retry may cure is the one offered again: the Neural Engine when its own failure is
+        // retryable (the status says so), else the card
+        let neural = status["device"]["neuralEngineRetry"] == true;
         let (label, id) =
             if neural { ("Try the Neural Engine again", "denoise:retryNeuralEngine") } else { ("Try the graphics card again", "denoise:retryGpu") };
         let r = ui.small_button(crate::i18n::tr(label));
