@@ -43,7 +43,7 @@ NVIDIA, Intel and Windows DX12 still rely on user reports.
 | Tethered capture (PTP over USB in pure Rust, Canon / Nikon / Sony first) | 25–45 | cameras (human) |
 | Printing with colour management | 15–25 | printers (human) |
 | Neural-engine inference for the other AI features (SAM 3, faces) and DirectML | 8–16 | depends on the AI model decision; denoise on the Neural Engine is done |
-| **Total** | **80–150 h** (the core set for beta, HDR display + monitor profile + pen pressure: 20–40 h) | |
+| **Total** | **75–140 h** (the core set for beta, HDR display + monitor profile + pen pressure: 20–40 h) | |
 
 ## Revision history
 

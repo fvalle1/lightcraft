@@ -2,11 +2,13 @@
 //!
 //! Core ML takes no ONNX, and the Neural Engine computes in 16-bit floats (largest value 65504): some denoisers' activations
 //! reach 10⁵ and their output is a million times the input (RawNIND's), which comes back as NaN from 16-bit
-//! arithmetic. So the network is first [`rescale`]d, exactly: convolutions are linear and a leaky ReLU or a maximum commutes
-//! with a positive factor, so each layer's weights and bias can absorb a power-of-two factor (exact in any float
-//! format) that brings that layer's activations down to a safe size, and the model's answer comes out a known power
-//! of two smaller ([`Built::output_scale`], which the caller divides out again). How far the activations reach is
-//! measured on a tile (`CpuRunner::peaks`, [`crate::reference::peaks`]).
+//! arithmetic. So the network is first [`rescale`]d: convolutions are linear and a leaky ReLU or a maximum commutes
+//! with a positive factor, so each layer's weights and bias can absorb a power-of-two factor (a power of two is exact
+//! in any float format, so in real arithmetic nothing changes) that brings that layer's activations down to a safe
+//! size, and the model's answer comes out a known power of two smaller ([`Built::output_scale`], which the caller
+//! divides out again). How far the activations reach is measured on a tile (`CpuRunner::peaks`,
+//! [`crate::reference::peaks`]); the 16-bit arithmetic itself is not exact, and [`fp16_report`] says how many of the
+//! rescaled weights it rounds to the coarse end of its range.
 //!
 //! Then [`spec`] writes the network as a Core ML `NeuralNetwork` model file (`.mlmodel`, a protobuf) with this
 //! file's own small encoder: no Core ML tools, no Python, no generated code. The file is compiled and run by
@@ -19,9 +21,12 @@ pub const INPUT: &str = "input";
 /// Name of the model's output array.
 pub const OUTPUT: &str = "output";
 
-/// The largest value an activation may reach after [`rescale`] on the tile the peaks were measured on. A 16-bit
-/// float tops out at 65504, so this leaves a factor 64 for tiles brighter or noisier than the measured one.
-pub const TARGET_PEAK: f32 = 1024.0;
+/// The largest value a layer's *output before its activation* may reach after [`rescale`] on the tile the peaks were
+/// measured on. A 16-bit float tops out at 65504, so this leaves a factor 16 for tiles brighter or noisier than the
+/// measured one (the check tile has the whole range, from black to clipped white, so that is little in practice). The
+/// peaks are measured after the activation; before a leaky ReLU a value can be `1 / alpha` times larger than what
+/// follows it, which [`rescale`] allows for.
+pub const TARGET_PEAK: f32 = 4096.0;
 
 /// What [`build`] makes.
 pub struct Built {
@@ -29,6 +34,51 @@ pub struct Built {
     pub mlmodel: Vec<u8>,
     /// The factor (a power of two, at most 1) the model's answer is smaller by than the network's: divide by it.
     pub output_scale: f32,
+    /// How the network's weights and biases sit in 16-bit range before the rescale, and after it.
+    pub before: Fp16Report,
+    pub after: Fp16Report,
+}
+
+/// How a network's weights and biases sit in the range of a 16-bit float: its normal numbers start at 6.1·10⁻⁵ (below
+/// that the precision falls away, below 6·10⁻⁸ a number is rounded to zero).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Fp16Report {
+    /// Non-zero weights and biases.
+    pub nonzero: usize,
+    /// Of those, the ones below the normal range (with less precision than 16 bits give the rest).
+    pub subnormal: usize,
+    /// Of those, the ones that round to zero.
+    pub lost: usize,
+}
+
+impl Fp16Report {
+    /// The share of the non-zero numbers that have less than full 16-bit precision.
+    pub fn subnormal_share(&self) -> f64 {
+        if self.nonzero == 0 { 0.0 } else { (self.subnormal + self.lost) as f64 / self.nonzero as f64 }
+    }
+}
+
+/// Count how `net`'s weights and biases sit in 16-bit range.
+pub fn fp16_report(net: &Net) -> Fp16Report {
+    const MIN_NORMAL: f32 = 6.103_515_6e-5;
+    const MIN_SUBNORMAL: f32 = 5.960_464_5e-8;
+    let mut r = Fp16Report::default();
+    for op in net.ops() {
+        let (w, b) = match op {
+            Op::Conv(c) => (&c.weight, &c.bias),
+            Op::ConvT2(c) => (&c.weight, &c.bias),
+            _ => continue,
+        };
+        for v in w.iter().chain(b).map(|v| v.abs()).filter(|v| *v > 0.0) {
+            r.nonzero += 1;
+            if v < MIN_SUBNORMAL / 2.0 {
+                r.lost += 1;
+            } else if v < MIN_NORMAL {
+                r.subnormal += 1;
+            }
+        }
+    }
+    r
 }
 
 fn invalid<T>(why: impl Into<String>) -> Result<T, NetError> {
@@ -44,7 +94,13 @@ pub fn rescale(net: &Net, peaks: &[f32]) -> Result<(Net, f32), NetError> {
     let mut scale = vec![1.0f32];
     let mut ops = Vec::with_capacity(net.ops().len());
     for (i, op) in net.ops().iter().enumerate() {
-        let peak = peaks.get(i + 1).copied().unwrap_or(0.0);
+        // the peak is measured after the activation: before a leaky ReLU a value can be 1 / alpha times larger
+        let leaky = match op {
+            Op::Conv(c) => c.leaky,
+            Op::ConvT2(c) => c.leaky,
+            _ => None,
+        };
+        let peak = peaks.get(i + 1).copied().unwrap_or(0.0) / leaky.map_or(1.0, |a| a.abs().clamp(1.0 / 64.0, 1.0));
         let of = |t: TensorId| scale.get(t).copied().ok_or_else(|| NetError::Invalid("a layer reads a tensor that does not exist yet".into()));
         let (scaled, s) = match op {
             Op::Conv(c) => {
@@ -100,7 +156,7 @@ fn safe_scale(peak: f32) -> f32 {
 /// (see [`rescale`]).
 pub fn build(net: &Net, tile: usize, peaks: &[f32]) -> Result<Built, NetError> {
     let (scaled, output_scale) = rescale(net, peaks)?;
-    Ok(Built { mlmodel: spec(&scaled, tile)?, output_scale })
+    Ok(Built { mlmodel: spec(&scaled, tile)?, output_scale, before: fp16_report(net), after: fp16_report(&scaled) })
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -426,9 +482,9 @@ mod tests {
     #[test]
     fn a_power_of_two_scale_brings_a_peak_to_the_target() {
         assert_eq!(safe_scale(0.0), 1.0);
-        assert_eq!(safe_scale(1024.0), 1.0);
-        assert_eq!(safe_scale(1025.0), 0.5);
-        assert_eq!(safe_scale(2.0e5), 2f32.powi(-8));
+        assert_eq!(safe_scale(TARGET_PEAK), 1.0);
+        assert_eq!(safe_scale(TARGET_PEAK * 1.01), 0.5);
+        assert_eq!(safe_scale(2.0e5), 2f32.powi(-6));
         assert!(2.0e5 * safe_scale(2.0e5) <= TARGET_PEAK);
         assert!(safe_scale(f32::MAX) > 0.0);
     }
@@ -486,14 +542,258 @@ mod tests {
         assert!(spec(&n, 0).is_err());
     }
 
+    /// A protobuf message as its fields: `(number, varint or bytes)`. Enough of the wire format to read our own output
+    /// back (no groups, no fixed-width fields but floats, which this reader keeps as bytes too).
+    #[derive(Debug)]
+    enum V {
+        Int(u64),
+        Bytes(Vec<u8>),
+    }
+
+    fn fields(mut b: &[u8]) -> Vec<(u32, V)> {
+        fn varint(b: &mut &[u8]) -> u64 {
+            let (mut v, mut shift) = (0u64, 0);
+            loop {
+                let byte = b[0];
+                *b = &b[1..];
+                v |= u64::from(byte & 0x7f) << shift;
+                if byte & 0x80 == 0 {
+                    return v;
+                }
+                shift += 7;
+            }
+        }
+        let mut out = Vec::new();
+        while !b.is_empty() {
+            let key = varint(&mut b);
+            let (field, wire) = ((key >> 3) as u32, key & 7);
+            out.push((
+                field,
+                match wire {
+                    0 => V::Int(varint(&mut b)),
+                    2 => {
+                        let n = varint(&mut b) as usize;
+                        let (body, rest) = b.split_at(n);
+                        b = rest;
+                        V::Bytes(body.to_vec())
+                    }
+                    5 => {
+                        let (body, rest) = b.split_at(4);
+                        b = rest;
+                        V::Bytes(body.to_vec())
+                    }
+                    w => panic!("wire type {w}"),
+                },
+            ));
+        }
+        out
+    }
+
+    fn bytes_of(f: &[(u32, V)], n: u32) -> Vec<&[u8]> {
+        f.iter().filter(|(k, _)| *k == n).filter_map(|(_, v)| if let V::Bytes(b) = v { Some(b.as_slice()) } else { None }).collect()
+    }
+
+    fn int_of(f: &[(u32, V)], n: u32) -> Option<u64> {
+        f.iter().find(|(k, _)| *k == n).and_then(|(_, v)| if let V::Int(i) = v { Some(*i) } else { None })
+    }
+
+    fn text(b: &[u8]) -> String {
+        String::from_utf8(b.to_vec()).unwrap()
+    }
+
+    fn packed(b: &[u8]) -> Vec<u64> {
+        let mut out = Vec::new();
+        let mut b = b;
+        while !b.is_empty() {
+            let (mut v, mut shift) = (0u64, 0);
+            loop {
+                let byte = b[0];
+                b = &b[1..];
+                v |= u64::from(byte & 0x7f) << shift;
+                if byte & 0x80 == 0 {
+                    break;
+                }
+                shift += 7;
+            }
+            out.push(v);
+        }
+        out
+    }
+
+    /// The layer's kind: the number of its parameters' field (100 convolution, 120 pooling, 130 activation, 320
+    /// concat, 345 reorganize data).
+    fn kind(layer: &[(u32, V)]) -> u32 {
+        layer.iter().map(|(k, _)| *k).find(|k| *k >= 100).unwrap()
+    }
+
+    /// The layers a network's operations are written as, by kind.
+    fn expected_kinds(n: &Net) -> Vec<u32> {
+        let mut want = Vec::new();
+        for op in n.ops() {
+            let (join, leaky) = match op {
+                Op::Conv(c) => (c.src2.is_some(), c.leaky.is_some()),
+                Op::ConvT2(c) => (false, c.leaky.is_some()),
+                Op::MaxPool2 { .. } => {
+                    want.push(120);
+                    continue;
+                }
+                Op::DepthToSpace2 { .. } => {
+                    want.push(345);
+                    continue;
+                }
+            };
+            want.extend(join.then_some(320));
+            want.push(100);
+            want.extend(leaky.then_some(130));
+        }
+        want
+    }
+
+    /// Every layer reads a tensor the input or an earlier layer made, and none is made twice; the last is the output.
+    fn check_graph(layers: &[Vec<(u32, V)>]) {
+        let mut known = vec![INPUT.to_string()];
+        for l in layers {
+            for i in bytes_of(l, 2) {
+                assert!(known.contains(&text(i)), "{} reads {} before it exists", text(bytes_of(l, 1)[0]), text(i));
+            }
+            let out = text(bytes_of(l, 3)[0]);
+            assert!(!known.contains(&out), "{out} is made twice");
+            known.push(out);
+        }
+        assert_eq!(known.last().map(String::as_str), Some(OUTPUT));
+    }
+
+    /// `(cout, cin, kernel, transposed)` of a convolution operation.
+    fn conv_dims(op: &Op) -> Option<(usize, usize, usize, bool)> {
+        match op {
+            Op::Conv(c) => Some((c.cout, c.cin, c.k, false)),
+            Op::ConvT2(c) => Some((c.cout, c.cin, 2, true)),
+            _ => None,
+        }
+    }
+
+    fn check_conv(params: &[(u32, V)], (cout, cin, k, deconv): (usize, usize, usize, bool)) {
+        assert_eq!((int_of(params, 1), int_of(params, 2)), (Some(cout as u64), Some(cin as u64)));
+        assert_eq!(packed(bytes_of(params, 20)[0]), vec![k as u64; 2]);
+        assert_eq!(packed(bytes_of(params, 30)[0]), vec![if deconv { 2 } else { 1 }; 2]);
+        assert_eq!(int_of(params, 60).is_some(), deconv, "isDeconvolution");
+        assert_eq!(int_of(params, 70), Some(1), "hasBias");
+        // "same" padding by amounts: (k - 1) / 2 on each edge, none for a transposed convolution
+        let amounts = fields(bytes_of(&fields(bytes_of(params, 50)[0]), 1)[0]);
+        let edges = bytes_of(&amounts, 10);
+        assert_eq!(edges.len(), 2);
+        let pad = if deconv { 0 } else { (k as u64 - 1) / 2 };
+        for e in edges {
+            let e = fields(e);
+            assert_eq!((int_of(&e, 1).unwrap_or(0), int_of(&e, 2).unwrap_or(0)), (pad, pad));
+        }
+        assert_eq!(bytes_of(params, 100).len(), usize::from(deconv), "a transposed convolution spells out its output size");
+        assert_eq!(bytes_of(&fields(bytes_of(params, 90)[0]), 1)[0].len() / 4, cout * cin * k * k);
+    }
+
+    /// A 2 x 2 maximum, stride 2: the exclude-padding flag (50), not the global-pooling one (60).
+    fn check_pool(params: &[(u32, V)]) {
+        assert_eq!(int_of(params, 1).unwrap_or(0), 0, "maximum");
+        assert_eq!(packed(bytes_of(params, 10)[0]), vec![2, 2]);
+        assert_eq!(packed(bytes_of(params, 20)[0]), vec![2, 2]);
+        assert_eq!((int_of(params, 50), int_of(params, 60)), (Some(1), None));
+    }
+
     #[test]
-    fn the_spec_names_its_input_and_output_and_has_every_layer() {
-        let n = net(32, 4, 1, 3);
+    fn the_spec_decodes_to_the_networks_layers_with_their_parameters_and_a_connected_graph() {
+        let n = net(32, 4, 2, 3);
         let bytes = spec(&n, 32).unwrap();
-        let has = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
-        assert!(has(INPUT.as_bytes()) && has(OUTPUT.as_bytes()));
-        // the same network twice gives the same bytes
-        assert_eq!(bytes, spec(&n, 32).unwrap());
+        let model = fields(&bytes);
+        assert_eq!(int_of(&model, 1), Some(5), "the specification version");
+        // the input and the output, with the input's shape
+        let description = fields(bytes_of(&model, 2)[0]);
+        let (input, output) = (fields(bytes_of(&description, 1)[0]), fields(bytes_of(&description, 10)[0]));
+        assert_eq!(text(bytes_of(&input, 1)[0]), INPUT);
+        assert_eq!(text(bytes_of(&output, 1)[0]), OUTPUT);
+        let array = fields(bytes_of(&fields(bytes_of(&input, 3)[0]), 5)[0]);
+        assert_eq!(packed(bytes_of(&array, 1)[0]), vec![1, 4, 32, 32]);
+        assert_eq!(int_of(&array, 2), Some(65568), "32-bit floats at the boundary");
+        // the layers, in the order the network's operations make them
+        let network = fields(bytes_of(&model, 500)[0]);
+        let layers: Vec<Vec<(u32, V)>> = bytes_of(&network, 1).into_iter().map(fields).collect();
+        assert_eq!(layers.iter().map(|l| kind(l)).collect::<Vec<_>>(), expected_kinds(&n));
+        check_graph(&layers);
+        // the parameters of each convolution and pooling layer, against the operation that made it
+        let mut convs = n.ops().iter().filter_map(conv_dims);
+        for l in &layers {
+            let params = fields(bytes_of(l, kind(l))[0]);
+            match kind(l) {
+                100 => check_conv(&params, convs.next().unwrap()),
+                120 => check_pool(&params),
+                // a leaky ReLU: the activation's field 15 holds the slope
+                130 => assert_eq!(bytes_of(&params, 15).len(), 1),
+                320 => assert!(params.is_empty()),
+                345 => assert_eq!((int_of(&params, 1), int_of(&params, 2)), (Some(2), Some(2)), "pixel shuffle, block 2"),
+                other => panic!("layer kind {other}"),
+            }
+        }
+        assert!(convs.next().is_none(), "every convolution was written");
+    }
+
+    #[test]
+    fn weights_in_the_coarse_end_of_16_bit_range_are_counted() {
+        let n = net(32, 4, 1, 3);
+        let r = fp16_report(&n);
+        assert!(r.nonzero > 0 && r.subnormal + r.lost <= r.nonzero);
+        // a network whose weights are all tiny is mostly subnormal; scaling them up brings them back
+        let tiny = |f: f32| {
+            let ops = n
+                .ops()
+                .iter()
+                .map(|op| match op {
+                    Op::Conv(c) => {
+                        Op::Conv(Conv { weight: c.weight.iter().map(|w| w * f).collect(), bias: c.bias.iter().map(|b| b * f).collect(), ..c.clone() })
+                    }
+                    Op::ConvT2(c) => Op::ConvT2(ConvT2 {
+                        weight: c.weight.iter().map(|w| w * f).collect(),
+                        bias: c.bias.iter().map(|b| b * f).collect(),
+                        ..c.clone()
+                    }),
+                    other => other.clone(),
+                })
+                .collect();
+            Net::new(n.in_channels, ops).unwrap()
+        };
+        assert!(fp16_report(&tiny(1e-5)).subnormal_share() > 0.5);
+        assert!(fp16_report(&tiny(1e-12)).lost > 0);
+        assert!(fp16_report(&tiny(1.0)).subnormal_share() < 0.5);
+        assert_eq!(Fp16Report::default().subnormal_share(), 0.0);
+    }
+
+    #[test]
+    fn a_small_leaky_slope_asks_for_more_headroom_because_the_value_before_it_can_be_larger() {
+        let n = net(32, 4, 1, 3);
+        let with_alpha = |alpha: Option<f32>| {
+            let ops = n
+                .ops()
+                .iter()
+                .map(|op| match op {
+                    Op::Conv(c) => Op::Conv(Conv { leaky: alpha.filter(|_| c.leaky.is_some()), ..c.clone() }),
+                    Op::ConvT2(c) => Op::ConvT2(ConvT2 { leaky: alpha.filter(|_| c.leaky.is_some()), ..c.clone() }),
+                    other => other.clone(),
+                })
+                .collect();
+            Net::new(n.in_channels, ops).unwrap()
+        };
+        // the same measured peak at the first layer, which has an activation: the scale that layer's bias took is the
+        // factor its output was brought down by
+        let mut peaks = vec![1.0; n.ops().len() + 1];
+        peaks.iter_mut().skip(1).for_each(|p| *p = 20_000.0);
+        let first_layer_scale = |alpha: Option<f32>| {
+            let (scaled, _) = rescale(&with_alpha(alpha), &peaks).unwrap();
+            let (Op::Conv(before), Op::Conv(after)) = (&n.ops()[0], &scaled.ops()[0]) else { panic!("a convolution first") };
+            let i = before.bias.iter().position(|b| b.abs() > 1e-6).unwrap();
+            after.bias[i] / before.bias[i]
+        };
+        let (none, mild, steep) = (first_layer_scale(None), first_layer_scale(Some(0.2)), first_layer_scale(Some(0.01)));
+        assert!(mild <= none && steep < mild, "a steeper activation gets more room: {none} {mild} {steep}");
+        // a slope of zero (a plain ReLU) cannot be bounded: it is treated as 1/64
+        assert_eq!(first_layer_scale(Some(0.0)), first_layer_scale(Some(1.0 / 64.0)));
     }
 }
 
@@ -569,12 +869,18 @@ mod core_ml_tests {
         println!("largest activation: {:.3e} (the input's {:.3})", peaks.iter().fold(0f32, |m, p| m.max(*p)), peaks[0]);
         let started = std::time::Instant::now();
         let built = build(&net, tile, &peaks).unwrap();
+        let share = |r: &Fp16Report| format!("{} of {} below the normal 16-bit range ({} lost)", r.subnormal + r.lost, r.nonzero, r.lost);
+        println!("weights and biases before: {}; after the rescale: {}", share(&built.before), share(&built.after));
         println!(
             "model file: {:.1} MB in {:.0} ms, output scale 2^{}",
             built.mlmodel.len() as f64 / 1e6,
             started.elapsed().as_secs_f64() * 1e3,
             built.output_scale.log2()
         );
+        // `LC_COREML_WRITE=<file>`: keep the model file, to look at it with other tools
+        if let Some(file) = std::env::var_os("LC_COREML_WRITE") {
+            std::fs::write(file, &built.mlmodel).unwrap();
+        }
         let dir = scratch("real");
         let started = std::time::Instant::now();
         let model = load(&built, &dir, ComputeUnits::CpuAndNeuralEngine);

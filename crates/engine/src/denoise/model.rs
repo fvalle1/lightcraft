@@ -1,7 +1,7 @@
 #[cfg(feature = "denoise")]
 use super::ane::{self, ANE_MAX_FALLBACKS, ANE_NAME, ANE_PARALLEL, AneSide, make_ane};
 #[cfg(feature = "denoise")]
-use super::gpu::{GPU_CRASHED, GPU_MAX_FALLBACKS, GPU_PARALLEL, GPU_SLOW, GPU_STUCK, card_is_faster, make_gpu};
+use super::gpu::{GPU_CRASHED, GPU_MAX_FALLBACKS, GPU_PARALLEL, GPU_SLOW, GPU_STUCK, card_is_faster, make_gpu, panic_text};
 #[cfg(feature = "denoise")]
 use super::settings::{installed_models, read_settings};
 #[cfg(feature = "denoise")]
@@ -56,7 +56,14 @@ impl RunOn {
 /// Whether the Neural Engine can be used at all in this build, on this computer (`denoise.models.list` →
 /// `neuralEngine`; the Settings choice shows only then).
 pub fn neural_engine_possible() -> bool {
-    cfg!(feature = "denoise") && cfg!(all(target_os = "macos", target_arch = "aarch64"))
+    #[cfg(feature = "denoise")]
+    {
+        ane::possible()
+    }
+    #[cfg(not(feature = "denoise"))]
+    {
+        false
+    }
 }
 
 /// A loaded denoise model: what runs tiles, and a self-check.
@@ -270,7 +277,10 @@ impl Network {
                     };
                     make_ane(&self.cpu, &self.path, &sha256, self.tile)
                 }))
-                .unwrap_or_else(|_| Err("the Neural Engine runner gave up".into()));
+                .unwrap_or_else(|p| {
+                    log::error!("denoise: setting up the Neural Engine panicked: {}", panic_text(&*p));
+                    Err("the Neural Engine runner gave up".into())
+                });
                 if let Err(why) = &made {
                     log::info!("denoise: not running on the Neural Engine ({why})");
                 }

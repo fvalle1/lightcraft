@@ -170,3 +170,36 @@ fn automatic_uses_the_neural_engine_only_where_it_measures_faster_than_the_proce
     assert_eq!(model.device(RunOn::Cpu)["kind"], "cpu");
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
+
+#[test]
+fn two_set_ups_of_the_same_model_at_once_do_not_share_a_half_made_folder() {
+    if !possible() {
+        lightcraft_testkit::skip!(System, "the Neural Engine is for Apple silicon");
+        return;
+    }
+    let (_first, cpu, path) = model("twice", 64);
+    let (input, _) = lightcraft_denoise::runtime::test_tile(64);
+    let want = cpu.run(&input).unwrap();
+    // two sessions of the app (or a retry beside a set-up that outlived its limit) make the Core ML model together
+    let results: Vec<_> = std::thread::scope(|s| {
+        let spawn = || {
+            s.spawn(|| {
+                let m = default_loader()(&path, &manifest(64)).unwrap();
+                let (runner, _) = m.runner(RunOn::Ane, 2);
+                (m.device(RunOn::Ane)["kind"].as_str().map(str::to_string), runner.run(&input).map(|out| worst(&want, &out)))
+            })
+        };
+        let (a, b) = (spawn(), spawn());
+        vec![a.join().unwrap(), b.join().unwrap()]
+    });
+    for (kind, run) in &results {
+        let run = run.as_ref().unwrap();
+        assert!(*run < 2e-2, "{run}");
+        // either the Neural Engine, or (when the other set-up replaced the folder under this one) the processor
+        assert!(matches!(kind.as_deref(), Some("ane" | "gpu" | "cpu")), "{kind:?}");
+    }
+    let leftovers: Vec<_> = kept(&path).into_iter().filter(|p| p.to_string_lossy().contains(".part-")).collect();
+    assert!(leftovers.is_empty(), "no half-made folder is left: {leftovers:?}");
+    assert!(!kept(&path).is_empty());
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}

@@ -9,7 +9,7 @@
 //! card's.
 
 use super::gpu::{ANE_SETUP_MARKER, card_tile_ms, set_up_card};
-use super::{Arc, Duration, Path, PathBuf, RunError, TileRunner};
+use super::{Arc, AtomicUsize, Duration, Ordering, Path, PathBuf, RunError, SystemTime, TileRunner};
 use lightcraft_coreml::{ComputeUnits, Model};
 use lightcraft_denoise::coreml::{self, INPUT, OUTPUT};
 
@@ -69,22 +69,26 @@ pub(super) fn worth_retrying(why: &str) -> bool {
 
 /// The set-up's own words for the Neural Engine, from [`set_up_card`]'s for a graphics card.
 fn for_ane(why: String) -> String {
-    why.replace("the graphics card", "the Neural Engine").replace("graphics card", "Neural Engine")
+    why.replace("the graphics card", "the Neural Engine")
+        .replace("graphics card", "Neural Engine")
+        .replace("the GPU runner", "the Neural Engine runner")
 }
 
 /// A model run through Core ML on the Neural Engine (with the processor for what it cannot take).
 pub(super) struct AneRunner {
     model: Model,
     tile: usize,
+    /// The network's input and output channels (4 and 3 for the Bayer-to-RGB models).
+    channels: (usize, usize),
     /// The factor the model's answer is smaller by than the network's (a power of two, see `coreml::rescale`).
     output_scale: f32,
 }
 
 impl TileRunner for AneRunner {
     fn run(&self, input: &[f32]) -> Result<Vec<f32>, RunError> {
-        let t = self.tile;
-        let mut out = self.model.predict(&[1, 4, t, t], input).map_err(|e| RunError::Runtime(e.to_string()))?;
-        if out.shape != [1, 3, 2 * t, 2 * t] {
+        let (t, (cin, cout)) = (self.tile, self.channels);
+        let mut out = self.model.predict(&[1, cin, t, t], input).map_err(|e| RunError::Runtime(e.to_string()))?;
+        if out.shape != [1, cout, 2 * t, 2 * t] {
             return Err(RunError::Runtime(format!("the Neural Engine's answer is shaped {:?}", out.shape)));
         }
         // back to the network's own scale (dividing by a power of two is exact)
@@ -115,10 +119,26 @@ fn read_scale(dir: &Path) -> Option<f32> {
     (s.is_finite() && s > 0.0 && s <= 1.0 && s.log2().fract() == 0.0 && s.log2() >= -120.0).then_some(s)
 }
 
-fn load(dir: &Path, tile: usize) -> Result<AneRunner, String> {
+fn load(dir: &Path, tile: usize, channels: (usize, usize)) -> Result<AneRunner, String> {
     let output_scale = read_scale(dir).ok_or("the kept Core ML model has no valid scale")?;
     let model = Model::load(&dir.join("net.mlmodelc"), ComputeUnits::CpuAndNeuralEngine, INPUT, OUTPUT).map_err(|e| e.to_string())?;
-    Ok(AneRunner { model, tile, output_scale })
+    Ok(AneRunner { model, tile, channels, output_scale })
+}
+
+/// Folders of made-but-never-finished models beside `dir` (a crash, a power cut) go after an hour: a set-up that is
+/// still running keeps touching its own.
+fn remove_stale_parts(dir: &Path) {
+    let (Some(parent), Some(name)) = (dir.parent(), dir.file_name().and_then(|n| n.to_str())) else { return };
+    let Ok(entries) = std::fs::read_dir(parent) else { return };
+    for e in entries.flatten() {
+        let stale = e.file_name().to_str().is_some_and(|n| n.starts_with(&format!("{name}.part-")))
+            && e.metadata()
+                .and_then(|m| m.modified())
+                .is_ok_and(|t| SystemTime::now().duration_since(t).is_ok_and(|age| age > Duration::from_secs(3600)));
+        if stale {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
 }
 
 /// Measure how far the network's activations reach, rewrite it for 16-bit arithmetic, have Core ML compile it and keep
@@ -127,8 +147,12 @@ fn build(net: &lightcraft_denoise::net::Net, tile: usize, dir: &Path) -> Result<
     let runner = lightcraft_denoise::cpu::NetRunner::new(net, tile).map_err(|e| e.to_string())?;
     let peaks = runner.peaks(&lightcraft_denoise::runtime::check_tile(tile)).map_err(|e| e.to_string())?;
     let built = coreml::build(net, tile, &peaks).map_err(|e| e.to_string())?;
-    let part = dir.with_extension("part");
-    let _ = std::fs::remove_dir_all(&part);
+    // a folder of this set-up's own: another set-up of the same model (a second session, a retry while an earlier
+    // one still runs after its time limit) never shares it
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let name = dir.file_name().and_then(|n| n.to_str()).ok_or("the kept model has no name")?;
+    let part = dir.with_file_name(format!("{name}.part-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+    remove_stale_parts(dir);
     std::fs::create_dir_all(&part).map_err(|e| format!("could not make {}: {e}", part.display()))?;
     let result = (|| {
         let file = part.join("net.mlmodel");
@@ -151,17 +175,23 @@ pub(super) fn make_ane(cpu: &lightcraft_denoise::runtime::CpuRunner, path: &Path
     if !possible() {
         return Err("this computer has no Neural Engine".into());
     }
+    let net = cpu.net().clone();
+    let channels = (net.in_channels, net.out_channels());
+    // the check tile has the four planes of a Bayer mosaic
+    if channels.0 != 4 {
+        return Err(format!("the check tile has 4 channels, not the model's {}", channels.0));
+    }
     let input = Arc::new(lightcraft_denoise::runtime::check_tile(tile));
-    let (on_ane, net) = (input.clone(), cpu.net().clone());
+    let on_ane = input.clone();
     let dir = cache_dir(path, sha256, tile);
     let ane = move || -> Result<_, String> {
-        let runner = match load(&dir, tile) {
+        let runner = match load(&dir, tile, channels) {
             Ok(r) => r,
             Err(kept) => {
                 // nothing kept, or what is kept does not load: make it again
                 log::debug!("denoise: making the Core ML model ({kept})");
                 build(&net, tile, &dir)?;
-                load(&dir, tile)?
+                load(&dir, tile, channels)?
             }
         };
         let got = runner.run(&on_ane).map_err(|e| format!("the Neural Engine could not run the check tile: {e}"))?;
@@ -186,6 +216,42 @@ pub(super) fn make_ane(cpu: &lightcraft_denoise::runtime::CpuRunner, path: &Path
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn half_made_models_older_than_an_hour_go_and_others_stay() {
+        let root = std::env::temp_dir().join(format!("lc-ane-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("abcd-t64-v1");
+        let (old, fresh, other, kept) =
+            (root.join("abcd-t64-v1.part-9-1"), root.join("abcd-t64-v1.part-9-2"), root.join("zzzz-t64-v1.part-9-1"), dir.clone());
+        for d in [&old, &fresh, &other, &kept] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let two_hours_ago = SystemTime::now() - Duration::from_secs(7200);
+        for d in [&old, &other, &kept] {
+            std::fs::File::open(d).unwrap().set_modified(two_hours_ago).unwrap();
+        }
+        remove_stale_parts(&dir);
+        assert!(!old.exists(), "a stale half-made model goes");
+        assert!(fresh.exists(), "one that may still be made stays");
+        assert!(other.exists(), "another model's stays");
+        assert!(kept.exists(), "a finished model is never touched");
+        // nothing to look at, nothing to fail
+        remove_stale_parts(Path::new("/nonexistent/x"));
+        remove_stale_parts(Path::new("/"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_panic_says_what_it_said() {
+        use crate::denoise::gpu::panic_text;
+        let literal = std::panic::catch_unwind(|| panic!("boom")).unwrap_err();
+        assert_eq!(panic_text(&*literal), "boom");
+        let formatted = std::panic::catch_unwind(|| panic!("{} {}", "a", 2)).unwrap_err();
+        assert_eq!(panic_text(&*formatted), "a 2");
+        let other = std::panic::catch_unwind(|| std::panic::panic_any(5u8)).unwrap_err();
+        assert_eq!(panic_text(&*other), "no message");
+    }
 
     #[test]
     fn the_switches_that_turn_accelerators_off_are_read_as_the_gpu_reads_them() {

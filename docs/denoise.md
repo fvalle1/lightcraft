@@ -100,18 +100,24 @@ model is rewritten on this computer (`lightcraft_denoise::coreml`, pure Rust, no
 
 1. The activations' reach is measured on the check tile on the CPU. RawNIND's reach 10⁶ and its answer is a million
    times the input, which came back as NaN from 16-bit arithmetic.
-2. Each layer's weights and bias absorb an exact power-of-two factor that keeps its activations at 1024 or below (a
-   factor 64 below the limit, for brighter or noisier tiles than the check tile). Convolutions are linear, and a
-   leaky ReLU or a maximum commutes with a positive factor, so this changes nothing but the scale of the answer,
-   which the runner multiplies back (RawNIND's comes out 2⁻¹¹ smaller): `Gain::MatchMean` and the rest of the
-   pipeline never see it. A test checks this against the CPU reference.
+2. Each layer's weights and bias absorb a power-of-two factor that keeps the value before its activation at 4096 or
+   below (a factor 16 below the limit, for brighter or noisier tiles than the check tile, which has the whole
+   range from black to clipped white). The peaks are measured after the activation, and before a leaky ReLU a value
+   can be `1 / alpha` times larger, which is allowed for. Convolutions are linear, and a leaky ReLU or a maximum
+   commutes with a positive factor, so in real arithmetic this changes nothing but the scale of the answer, which
+   the runner multiplies back (RawNIND's comes out 2⁻⁹ smaller): `Gain::MatchMean` and the rest of the pipeline
+   never see it. A test checks this against the CPU reference. The 16-bit arithmetic itself is not exact: the
+   check tile's answer differs from the CPU's by 3.6×10⁻³ of its largest value. Smaller weights lose precision in
+   16 bits, so `coreml::fp16_report` counts the ones below its normal range: on RawNIND 9,849 of 7.76 million
+   before the rescale, 16,217 after (9 round to zero).
 3. The network is written as a Core ML `NeuralNetwork` model, compiled by Core ML and kept in
    `<model folder>/coreml/<model hash>-t<tile>-v<writer>/` (`net.mlmodelc` and `scale`). A kept model that does not
    load is made again.
 
-Setting it up works like the graphics card's (first photo that may use it, own thread, 60 s limit, `ane-setup.marker`
+Setting it up works like the graphics card's (first photo that may use it, own thread, 60 s limit that includes
+the first compile (0.3 s on an A18 Pro; the compiled model is kept, so later set-ups skip it), `ane-setup.marker`
 beside the model while it runs, a check tile compared with the CPU's answer and timed): the answer may differ from the
-CPU's by up to 2 % of its largest value (measured: 3×10⁻³ on RawNIND's model), a tile it gets wrong or cannot run goes to
+CPU's by up to 2 % of its largest value (measured: 3.6×10⁻³ on RawNIND's model), a tile it gets wrong or cannot run goes to
 the CPU, and three wrong tiles stop it. **Automatic** tries the Neural Engine first and uses it where its check tile
 is faster than the processor's at the pace the photo runs at, and than the card's when that was measured; **Neural
 Engine** uses it whenever it can (and otherwise behaves as Automatic); choosing where denoise runs again lets a
