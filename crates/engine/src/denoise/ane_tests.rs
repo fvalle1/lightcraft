@@ -142,6 +142,11 @@ fn a_marker_from_a_crash_keeps_the_neural_engine_off_until_the_user_chooses() {
     let (_runner, _) = model.runner(RunOn::Ane, 2);
     let device = model.device(RunOn::Ane);
     assert_ne!(device["kind"], "ane", "{device}");
+    // the set-up has finished (crashed): its reason is in the status, and a retry is offered where the processor runs
+    assert_eq!(device["neuralEngineReason"], ANE_CRASHED, "{device}");
+    if device["kind"] == "cpu" {
+        assert_eq!(device["retry"], true, "{device}");
+    }
     assert!(path.with_file_name(ANE_SETUP_MARKER).exists(), "the marker stays until the user chooses again");
     assert!(kept(&path).is_empty(), "nothing is made while the marker is there");
     let _ = std::fs::remove_dir_all(path.parent().unwrap());

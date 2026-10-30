@@ -343,7 +343,11 @@ fn speed_section(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, list: &
     hint(
         ui,
         t,
-        "Automatic uses the graphics card where it is faster than the processor: both are timed on this computer the first time a photo is made.",
+        if neural_engine {
+            "Automatic uses the Neural Engine or the graphics card, whichever is faster than the processor: they are timed on this computer the first time a photo is made."
+        } else {
+            "Automatic uses the graphics card where it is faster than the processor: both are timed on this computer the first time a photo is made."
+        },
     );
     if neural_engine {
         hint(ui, t, "The Neural Engine is the chip Apple made for this kind of work: much faster here, and it computes in 16-bit numbers.");

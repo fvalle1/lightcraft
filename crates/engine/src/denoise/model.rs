@@ -467,6 +467,11 @@ impl Model for Network {
         if run_on != RunOn::Cpu && self.gpu.get().is_none() {
             return json!({"kind": "pending"});
         }
+        // the Neural Engine was asked for and its set-up has finished without a result: keep its reason
+        let ane_why = match &ane {
+            Err(why) if run_on == RunOn::Ane && self.ane.get().is_some() => Some(why.clone()),
+            _ => None,
+        };
         let mut v = match self.choose(run_on, threads, false) {
             Ok(g) => json!({"kind": "gpu", "adapter": g.adapter}),
             // a set-up that crashed or ran out of time can be tried again (`denoise.settings {runOn}`)
@@ -477,6 +482,16 @@ impl Model for Network {
             o.insert("cardMs".into(), json!(g.card_ms));
             o.insert("cpuMs".into(), json!(g.cpu_ms));
             o.insert("fellBack".into(), json!(self.fallbacks.load(Ordering::Relaxed)));
+        }
+        if let Some(why) = &ane_why {
+            let on_cpu = v["kind"] == "cpu";
+            if let Some(o) = v.as_object_mut() {
+                o.insert("neuralEngineReason".into(), json!(why));
+                // retry only where the processor runs the photo: the card's device is in use, so no retry is offered
+                if on_cpu && worth_retrying(why) {
+                    o.insert("retry".into(), json!(true));
+                }
+            }
         }
         if let (Some(r), Some(o)) = (&self.remote, v.as_object_mut()) {
             o.insert("remote".into(), r.describe());
