@@ -174,6 +174,16 @@ impl Sam3 {
         Ok(Encoded { backbone: self.backbone.forward(&pixels.to_device(&self.device)?)?, tracker: None, detector: None })
     }
 
+    /// The first layer's input for preprocessed pixels `[1, 3, 1008, 1008]` (−1..1): `[1, 72, 72, 1024]`.
+    pub fn embed_pixels(&self, pixels: &Tensor) -> Result<Tensor> {
+        self.backbone.embed(&pixels.to_device(&self.device)?)
+    }
+
+    /// An [`Encoded`] from backbone features computed elsewhere: `[1, 1024, 72, 72]`, as the backbone gives.
+    pub fn encoded_from(&self, backbone: Tensor) -> Encoded {
+        Encoded { backbone, tracker: None, detector: None }
+    }
+
     fn tracker_parts(&mut self) -> Result<(&neck::Neck, &tracker::Tracker)> {
         if self.tracker_neck.is_none() {
             self.tracker_neck = Some(neck::Neck::new(Self::vb(&self.weights, &self.device).pp("tracker_neck"))?);

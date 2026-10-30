@@ -24,6 +24,9 @@ lightcraft-fetch = { workspace = true }
 candle-core = { workspace = true, features = ["metal"] }
 candle-nn = { workspace = true, features = ["metal"] }
 
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+lightcraft-coreml = { workspace = true }
+
 [dev-dependencies]
 # tests record why they skip (`cargo xtask ci` lists the skips)
 lightcraft-testkit = { workspace = true }
