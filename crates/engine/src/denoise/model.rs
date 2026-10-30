@@ -567,6 +567,7 @@ pub fn serving(dir: Option<&Path>, id: Option<&str>, run_on: RunOn) -> Result<Se
     let d = net.device(run_on);
     let device = match d["kind"].as_str() {
         Some("gpu") => format!("GPU: {}", d["adapter"].as_str().unwrap_or("?")),
+        Some("ane") => "Neural Engine".to_string(),
         _ => format!("CPU ({})", d["reason"].as_str().unwrap_or("chosen")),
     };
     let run: lightcraft_denoise::remote::RunTile = Arc::new(move |input: &[f32]| net.runner(run_on, GPU_PARALLEL).0.run(input));
