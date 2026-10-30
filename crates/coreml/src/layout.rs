@@ -19,6 +19,7 @@ pub enum Dtype {
 }
 
 impl Dtype {
+    /// Bytes per element.
     pub fn size(self) -> usize {
         match self {
             Dtype::F16 => 2,
@@ -79,6 +80,7 @@ fn decode(b: &[u8], dtype: Dtype) -> f32 {
     }
 }
 
+/// The `element`th number of `bytes`, widened to `f32`; `None` when it lies outside them.
 fn read(bytes: &[u8], dtype: Dtype, element: usize) -> Option<f32> {
     let size = dtype.size();
     let at = element.checked_mul(size)?;

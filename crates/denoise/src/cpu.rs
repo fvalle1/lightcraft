@@ -195,9 +195,11 @@ impl NetRunner {
         }
         result.map(|_| peaks)
     }
+    /// Runs the network on one tile.
     fn execute(&self, input: &[f32], w: &mut Workspace) -> Result<Vec<f32>> {
         self.execute_with(input, w, None)
     }
+    /// Runs the network on one tile, and when `peaks` is given pushes the largest absolute value of every layer's output onto it.
     fn execute_with(&self, input: &[f32], w: &mut Workspace, mut peaks: Option<&mut Vec<f32>>) -> Result<Vec<f32>> {
         let first = self.plan.tensors.first().ok_or_else(|| bad("no input"))?;
         let want = count(first.channels, first.side)?;

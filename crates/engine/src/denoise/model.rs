@@ -43,6 +43,7 @@ impl RunOn {
         }
     }
 
+    /// The setting's name as stored and reported.
     pub fn name(self) -> &'static str {
         match self {
             RunOn::Auto => "auto",
@@ -326,6 +327,7 @@ impl Network {
         Ok(a)
     }
 
+    /// Counts a tile the Neural Engine got wrong, and says so once.
     fn ane_fell_back(&self, why: &str) {
         let n = self.ane_fallbacks.fetch_add(1, Ordering::Relaxed) + 1;
         if n == 1 {
@@ -349,6 +351,7 @@ impl Network {
 /// running any tile either gets wrong. Handed out for photos that run on the card or have a server to share.
 #[cfg(feature = "denoise")]
 impl TileRunner for Network {
+    /// Runs one tile where the denoise engine chose: a remote server, the Neural Engine, the graphics card or the processor, with the processor as the fallback.
     fn run(&self, input: &[f32]) -> Result<Vec<f32>, RunError> {
         if let Some(Ok(remote)) = self.remote.as_ref().filter(|r| r.share.load(Ordering::Relaxed)).map(|r| r.usable(false))
             && let Some(Ok(out)) = remote.try_run(input)
@@ -384,6 +387,7 @@ impl Model for Network {
     fn bytes_per_tile(&self) -> usize {
         self.cpu.bytes_per_tile()
     }
+    /// The runner to use for `run_on` and how many tiles may run at once; the Neural Engine is tried first, then the graphics card.
     fn runner(&self, run_on: RunOn, threads: usize) -> (&dyn TileRunner, usize) {
         let threads = threads.max(1);
         self.last_threads.store(threads, Ordering::Relaxed);
@@ -430,6 +434,7 @@ impl Model for Network {
         if on_ane || card { (self, local) } else { (&self.cpu, local) }
     }
 
+    /// Checks the processor's answers, then sets up the device `run_on` asks for and reports how it did.
     fn self_test(&self, run_on: RunOn) -> Result<Value, String> {
         let t = self.cpu.self_test();
         if !t.ok {
@@ -450,6 +455,7 @@ impl Model for Network {
         Ok(v)
     }
 
+    /// Where tiles run now: `{kind: ane | gpu | cpu | pending, …}` with the measured times and, for the Neural Engine, why it was not used.
     fn device(&self, run_on: RunOn) -> Value {
         let threads = match self.last_threads.load(Ordering::Relaxed) {
             0 => Pace::Full.parallel(std::thread::available_parallelism().map_or(1, |n| n.get()), None),

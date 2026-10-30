@@ -54,6 +54,7 @@ fn host_of(k: &Known) -> Option<String> {
     k.download.as_ref().map(|d| lightcraft_denoise::known::host(&d.url).to_string())
 }
 
+/// `denoise.models.list`: the installed and known models, the settings, and whether this computer has a Neural Engine.
 fn list(s: &mut Session, _: &Value) -> Result<Value> {
     s.denoise_refresh_active(true);
     let dir = s.denoise.models_dir.clone();
@@ -486,6 +487,7 @@ fn select(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"model": st.model}))
 }
 
+/// `denoise.settings`: reads and changes the settings (`auto`, `cacheGb`, `threads`, `runOn`).
 fn settings(s: &mut Session, p: &Value) -> Result<Value> {
     const C: &str = "denoise.settings";
     let dir = models_dir(s, C)?;
@@ -652,6 +654,7 @@ fn clear(s: &mut Session, _: &Value) -> Result<Value> {
     Ok(json!({"deleted": files, "bytes": bytes}))
 }
 
+/// The denoise commands.
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!(query "denoise.models.list", "Denoise Models", [], None, "{} → {dir, productsDir, model, runtime, auto, cacheGb, threads, runOn, neuralEngine, models: [{id, name, version, licence{name, commercial, url, notice}, provenance, source, sizeBytes, sha256, tile, known, downloadHost, installed, selected, accepted}]}", always, list),

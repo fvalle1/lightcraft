@@ -81,6 +81,7 @@ pub fn fp16_report(net: &Net) -> Fp16Report {
     r
 }
 
+/// An invalid-network error with this reason.
 fn invalid<T>(why: impl Into<String>) -> Result<T, NetError> {
     Err(NetError::Invalid(why.into()))
 }
@@ -163,6 +164,7 @@ pub fn build(net: &Net, tile: usize, peaks: &[f32]) -> Result<Built, NetError> {
 // protobuf
 
 mod pb {
+    /// Appends `v` as a protobuf varint (seven bits per byte, low group first).
     pub fn varint(mut v: u64, out: &mut Vec<u8>) {
         loop {
             let byte = (v & 0x7f) as u8;
@@ -175,6 +177,7 @@ mod pb {
         }
     }
 
+    /// Appends the key of a field: its number and wire type.
     fn tag(field: u32, wire: u8, out: &mut Vec<u8>) {
         varint((u64::from(field) << 3) | u64::from(wire), out);
     }
@@ -187,6 +190,7 @@ mod pb {
         }
     }
 
+    /// Appends a boolean field (nothing is written when it is false).
     pub fn boolean(field: u32, v: bool, out: &mut Vec<u8>) {
         uint(field, u64::from(v), out);
     }
@@ -198,10 +202,12 @@ mod pb {
         out.extend_from_slice(b);
     }
 
+    /// Appends a string field.
     pub fn string(field: u32, s: &str, out: &mut Vec<u8>) {
         bytes(field, s.as_bytes(), out);
     }
 
+    /// Appends a 32-bit float field (nothing is written for zero, the default).
     pub fn float(field: u32, v: f32, out: &mut Vec<u8>) {
         if v != 0.0 {
             tag(field, 5, out);
@@ -262,6 +268,7 @@ fn size(n: usize) -> u64 {
     n as u64
 }
 
+/// The Core ML name of tensor `t`: `input`, `output` for the last one, else a numbered name.
 fn name_of(t: TensorId, last: TensorId) -> String {
     match t {
         0 => INPUT.to_string(),
@@ -283,12 +290,14 @@ fn valid_padding(field: u32, pad: u64) -> Vec<u8> {
     pb::wrap(field, &valid)
 }
 
+/// The weights message holding `values` as a packed float list.
 fn weights(values: &[f32]) -> Vec<u8> {
     let mut w = Vec::new();
     pb::packed_f32(1, values, &mut w);
     w
 }
 
+/// One Core ML layer: its name, input and output names, the number of its kind's field and its parameters.
 fn layer(name: &str, inputs: &[&str], output: &str, kind: u32, params: &[u8]) -> Vec<u8> {
     let mut l = Vec::new();
     pb::string(LAYER_NAME, name, &mut l);
@@ -311,6 +320,7 @@ struct ConvSpec<'a> {
     out_side: Option<usize>,
 }
 
+/// The parameters of a convolution layer, with its weights and bias.
 fn convolution(c: &ConvSpec) -> Vec<u8> {
     let mut p = Vec::new();
     pb::uint(1, size(c.cout), &mut p);
@@ -332,6 +342,7 @@ fn convolution(c: &ConvSpec) -> Vec<u8> {
     p
 }
 
+/// The activation layer parameters of a leaky ReLU with slope `alpha`.
 fn leaky_relu(alpha: f32) -> Vec<u8> {
     let mut leaky = Vec::new();
     pb::float(1, alpha, &mut leaky);

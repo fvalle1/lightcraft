@@ -19,10 +19,12 @@ use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::{Mutex, PoisonError};
 
+/// Core ML's own description of an error.
 fn describe(e: &NSError) -> String {
     e.localizedDescription().to_string()
 }
 
+/// A file URL for `path`; an error when the path is not valid UTF-8.
 fn url_of(path: &Path) -> Result<Retained<NSURL>, Error> {
     let s = path.to_str().ok_or_else(|| Error::Input(format!("{} is not valid UTF-8", path.display())))?;
     Ok(NSURL::fileURLWithPath(&NSString::from_str(s)))
@@ -44,6 +46,7 @@ fn target_of(source: &Path, dest_dir: &Path) -> Result<PathBuf, Error> {
     Ok(dest_dir.join(format!("{stem}.mlmodelc")))
 }
 
+/// Compiles the model at `source` into `dest_dir` (see the crate's `compile`), removing Core ML's temporary folder on every path.
 pub fn compile(source: &Path, dest_dir: &Path) -> Result<PathBuf, Error> {
     autoreleasepool(|_| {
         let target = target_of(source, dest_dir)?;
@@ -109,6 +112,7 @@ unsafe impl Send for Loaded {}
 // SAFETY: as above: shared use only reads the immutable names and takes the lock for the model.
 unsafe impl Sync for Loaded {}
 
+/// Core ML's setting for where a model may run.
 fn units(u: ComputeUnits) -> MLComputeUnits {
     match u {
         ComputeUnits::CpuOnly => MLComputeUnits::CPUOnly,
@@ -119,6 +123,7 @@ fn units(u: ComputeUnits) -> MLComputeUnits {
 }
 
 impl Loaded {
+    /// Loads a compiled model for `u`, checking it has the named input and output.
     pub fn load(compiled: &Path, u: ComputeUnits, input: &str, output: &str) -> Result<Loaded, Error> {
         autoreleasepool(|_| {
             if !compiled.exists() {
@@ -138,6 +143,7 @@ impl Loaded {
         })
     }
 
+    /// Runs the model on `data` (shaped `shape`) and returns the output array.
     pub fn predict(&self, shape: &[usize], data: &[f32]) -> Result<Tensor, Error> {
         autoreleasepool(|_| {
             let features = self.features(shape, data)?;

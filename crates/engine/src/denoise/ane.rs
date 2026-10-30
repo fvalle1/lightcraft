@@ -85,6 +85,7 @@ pub(super) struct AneRunner {
 }
 
 impl TileRunner for AneRunner {
+    /// Runs one tile on the Neural Engine and divides the answer by the model's output scale.
     fn run(&self, input: &[f32]) -> Result<Vec<f32>, RunError> {
         let (t, (cin, cout)) = (self.tile, self.channels);
         let mut out = self.model.predict(&[1, cin, t, t], input).map_err(|e| RunError::Runtime(e.to_string()))?;
@@ -119,6 +120,7 @@ fn read_scale(dir: &Path) -> Option<f32> {
     (s.is_finite() && s > 0.0 && s <= 1.0 && s.log2().fract() == 0.0 && s.log2() >= -120.0).then_some(s)
 }
 
+/// Loads the kept Core ML model in `dir` for the Neural Engine.
 fn load(dir: &Path, tile: usize, channels: (usize, usize)) -> Result<AneRunner, String> {
     let output_scale = read_scale(dir).ok_or("the kept Core ML model has no valid scale")?;
     let model = Model::load(&dir.join("net.mlmodelc"), ComputeUnits::CpuAndNeuralEngine, INPUT, OUTPUT).map_err(|e| e.to_string())?;
