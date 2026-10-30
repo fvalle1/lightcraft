@@ -116,6 +116,17 @@ impl NeuralEngine {
         }
     }
 
+    /// Sets the status by hand, for the tests of code that reads it (never used by the app).
+    #[doc(hidden)]
+    pub fn pretend(&self, status: Status) {
+        *self.lock() = match status {
+            Status::Idle => Slot::Idle,
+            Status::Building | Status::Checking => Slot::Building,
+            Status::Using { .. } => Slot::Idle,
+            Status::Off(why) => Slot::Off(why),
+        };
+    }
+
     /// Starts making and loading the Neural Engine's model in `cache` on its own thread (once: later calls do
     /// nothing). `weights` are the checkpoint's. Never blocks and never fails: the outcome is in [`Self::status`].
     pub(crate) fn start(self: &Arc<Self>, weights: Arc<Weights>, cache: PathBuf) {
