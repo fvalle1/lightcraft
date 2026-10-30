@@ -139,6 +139,20 @@ Measured on an Apple A18 Pro (8 GB, macOS 26.7), RawNIND UtNet2 (Bayer), one 512
 CPU about 0.7 W (before: ANE 0 mW, and the graphics card at up to 7.5 W for the longer run). The Neural Engine draws
 power too; energy per photo is that times the (much shorter) time, to be measured per photo, not assumed.
 
+Whole photo, in the app (a Canon CR3, 5208 × 3908 after the model's Bayer packing, `powermetrics` at 1 s, CPU + GPU +
+ANE power summed over the busy seconds, one run each, so approximate):
+
+| Speed | Time | Energy |
+|---|---:|---:|
+| Neural Engine | 4.0 s | about 17 J |
+| Graphics card | 10.4 s | about 85 J |
+| Processor | 28.2 s | about 126 J |
+
+With the Neural Engine the CPU draws about 5 W for 3 s (decode, packing, tiling); the Neural Engine itself 0.25–0.9 W
+and the graphics card almost nothing. The picture it makes differs from the processor's by 0.016 of an 8-bit
+display level on average (largest 4 levels in single pixels, fewer than 0.0001 % of samples differ by more than 1 level; white taken at the
+99.5th percentile, gamma 2.2).
+
 ```text
 LC_DENOISE_MODEL=<model.onnx> cargo test --release -p lightcraft-gpu --features denoise --lib real_model -- --ignored --nocapture
 LC_DENOISE_MODEL=<model.onnx> LC_COREML_LOOP_SECS=22 cargo test --release -p lightcraft-denoise --features runtime --lib coreml::core_ml_tests::the_real_model -- --nocapture
