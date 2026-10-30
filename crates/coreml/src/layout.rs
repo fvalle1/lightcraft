@@ -19,6 +19,7 @@ pub enum Dtype {
 }
 
 impl Dtype {
+    /// Bytes per element.
     pub fn size(self) -> usize {
         match self {
             Dtype::F16 => 2,
@@ -79,6 +80,7 @@ fn decode(b: &[u8], dtype: Dtype) -> f32 {
     }
 }
 
+/// The `element`th number of `bytes`, widened to `f32`; `None` when it lies outside them.
 fn read(bytes: &[u8], dtype: Dtype, element: usize) -> Option<f32> {
     let size = dtype.size();
     let at = element.checked_mul(size)?;
@@ -137,10 +139,12 @@ pub fn gather(bytes: &[u8], dtype: Dtype, shape: &[usize], strides: &[usize]) ->
 mod tests {
     use super::*;
 
+    /// The little-endian bytes of `values`.
     fn f32_bytes(v: &[f32]) -> Vec<u8> {
         v.iter().flat_map(|x| x.to_le_bytes()).collect()
     }
 
+    /// Test: half floats decode exactly.
     #[test]
     fn half_floats_decode_exactly() {
         assert_eq!(f16_to_f32(0x0000), 0.0);
@@ -154,6 +158,7 @@ mod tests {
         assert_eq!(f16_to_f32(0x3555), 0.333_251_95);
     }
 
+    /// Test: contiguous arrays are read in order.
     #[test]
     fn contiguous_arrays_are_read_in_order() {
         let v: Vec<f32> = (0..24).map(|i| i as f32).collect();
@@ -162,6 +167,7 @@ mod tests {
         assert_eq!(gather(&f32_bytes(&v), Dtype::F32, &[2, 3, 4], &strides).unwrap(), v);
     }
 
+    /// Test: padded rows are skipped.
     #[test]
     fn padded_rows_are_skipped() {
         // 2 x 3 elements, rows 5 apart: [0 1 2 . .] [5 6 7 . .]
@@ -170,6 +176,7 @@ mod tests {
         assert_eq!(got, vec![0.0, 1.0, 2.0, 5.0, 6.0, 7.0]);
     }
 
+    /// Test: a transposed view is gathered row major.
     #[test]
     fn a_transposed_view_is_gathered_row_major() {
         // the 2 x 3 view of a 3 x 2 array stored row-major: element [i, j] is at i + 2 j
@@ -178,6 +185,7 @@ mod tests {
         assert_eq!(got, vec![0.0, 2.0, 4.0, 1.0, 3.0, 5.0]);
     }
 
+    /// Test: half and double arrays are converted.
     #[test]
     fn half_and_double_arrays_are_converted() {
         let h: Vec<u8> = [0x3c00u16, 0xc000, 0x3800].iter().flat_map(|x| x.to_le_bytes()).collect();
@@ -186,6 +194,7 @@ mod tests {
         assert_eq!(gather(&d, Dtype::F64, &[2], &[1]).unwrap(), vec![1.5, -0.25]);
     }
 
+    /// Test: hostile shapes and strides are errors not panics.
     #[test]
     fn hostile_shapes_and_strides_are_errors_not_panics() {
         let bytes = f32_bytes(&[1.0; 4]);

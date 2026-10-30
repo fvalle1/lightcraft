@@ -19,10 +19,12 @@ use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::{Mutex, PoisonError};
 
+/// Core ML's own description of an error.
 fn describe(e: &NSError) -> String {
     e.localizedDescription().to_string()
 }
 
+/// A file URL for `path`; an error when the path is not valid UTF-8.
 fn url_of(path: &Path) -> Result<Retained<NSURL>, Error> {
     let s = path.to_str().ok_or_else(|| Error::Input(format!("{} is not valid UTF-8", path.display())))?;
     Ok(NSURL::fileURLWithPath(&NSString::from_str(s)))
@@ -33,26 +35,44 @@ fn sizes(array: &NSArray<NSNumber>) -> Result<Vec<usize>, Error> {
     array.to_vec().iter().map(|n| usize::try_from(n.as_isize()).map_err(|_| Error::Output("a negative size or stride".into()))).collect()
 }
 
+/// Where the compiled model of `source` is kept in `dest_dir`: `<file name without .mlmodel>.mlmodelc`. Only the
+/// `.mlmodel` suffix goes, so `model.v2.mlmodel` and `model.v3.mlmodel` keep apart.
+fn target_of(source: &Path, dest_dir: &Path) -> Result<PathBuf, Error> {
+    let name = source.file_name().and_then(|n| n.to_str()).ok_or_else(|| Error::Input("the model has no usable file name".into()))?;
+    let stem = name.strip_suffix(".mlmodel").unwrap_or(name);
+    if stem.is_empty() {
+        return Err(Error::Input("the model has no file name".into()));
+    }
+    Ok(dest_dir.join(format!("{stem}.mlmodelc")))
+}
+
+/// Compiles the model at `source` into `dest_dir` (see the crate's `compile`), removing Core ML's temporary folder on every path.
 pub fn compile(source: &Path, dest_dir: &Path) -> Result<PathBuf, Error> {
     autoreleasepool(|_| {
+        let target = target_of(source, dest_dir)?;
         let url = url_of(source)?;
         // SAFETY: `url` is a valid file URL object; the call only reads the model file and returns a URL of the
         // compiled folder in a temporary place, or an error.
         #[allow(deprecated)]
         let compiled = unsafe { MLModel::compileModelAtURL_error(&url) }.map_err(|e| Error::Compile(describe(&e)))?;
         let made = compiled.path().map(|p| PathBuf::from(p.to_string())).ok_or_else(|| Error::Compile("Core ML gave no path".into()))?;
-        let name = source.file_stem().ok_or_else(|| Error::Input("the model has no file name".into()))?;
-        let target = dest_dir.join(name).with_extension("mlmodelc");
-        std::fs::create_dir_all(dest_dir).map_err(|e| Error::Compile(format!("{}: {e}", dest_dir.display())))?;
-        if target.exists() {
-            std::fs::remove_dir_all(&target).map_err(|e| Error::Compile(format!("{}: {e}", target.display())))?;
-        }
-        // the temporary folder may be on another volume: copy then
-        if std::fs::rename(&made, &target).is_err() {
-            copy_dir(&made, &target, 0).map_err(|e| Error::Compile(format!("{}: {e}", target.display())))?;
-            let _ = std::fs::remove_dir_all(&made);
-        }
-        Ok(target)
+        let kept = (|| {
+            std::fs::create_dir_all(dest_dir).map_err(|e| Error::Compile(format!("{}: {e}", dest_dir.display())))?;
+            if target.exists() {
+                std::fs::remove_dir_all(&target).map_err(|e| Error::Compile(format!("{}: {e}", target.display())))?;
+            }
+            // the temporary folder may be on another volume: copy then
+            if std::fs::rename(&made, &target).is_err()
+                && let Err(e) = copy_dir(&made, &target, 0)
+            {
+                let _ = std::fs::remove_dir_all(&target);
+                return Err(Error::Compile(format!("{}: {e}", target.display())));
+            }
+            Ok(())
+        })();
+        // whatever happened, Core ML's temporary folder is not left behind (it is gone after a rename)
+        let _ = std::fs::remove_dir_all(&made);
+        kept.map(|()| target)
     })
 }
 
@@ -92,6 +112,7 @@ unsafe impl Send for Loaded {}
 // SAFETY: as above: shared use only reads the immutable names and takes the lock for the model.
 unsafe impl Sync for Loaded {}
 
+/// Core ML's setting for where a model may run.
 fn units(u: ComputeUnits) -> MLComputeUnits {
     match u {
         ComputeUnits::CpuOnly => MLComputeUnits::CPUOnly,
@@ -102,6 +123,8 @@ fn units(u: ComputeUnits) -> MLComputeUnits {
 }
 
 impl Loaded {
+    /// Loads a compiled model for `u`; the names of its input and output are used by [`Loaded::predict`], which says so
+    /// when the model has no such feature.
     pub fn load(compiled: &Path, u: ComputeUnits, input: &str, output: &str) -> Result<Loaded, Error> {
         autoreleasepool(|_| {
             if !compiled.exists() {
@@ -121,6 +144,7 @@ impl Loaded {
         })
     }
 
+    /// Runs the model on `data` (shaped `shape`) and returns the output array.
     pub fn predict(&self, shape: &[usize], data: &[f32]) -> Result<Tensor, Error> {
         autoreleasepool(|_| {
             let features = self.features(shape, data)?;
@@ -198,4 +222,24 @@ fn read_array(array: &MLMultiArray) -> Result<Tensor, Error> {
     unsafe { array.getBytesWithHandler(&take) };
     let data = layout::gather(&copy.borrow(), dtype, &shape, &strides)?;
     Ok(Tensor { shape, data })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test: compiled models of dotted names keep apart.
+    #[test]
+    fn compiled_models_of_dotted_names_keep_apart() {
+        let dir = Path::new("/models");
+        let a = target_of(Path::new("/x/model.v2.mlmodel"), dir).unwrap();
+        let b = target_of(Path::new("/x/model.v3.mlmodel"), dir).unwrap();
+        assert_eq!(a, Path::new("/models/model.v2.mlmodelc"));
+        assert_ne!(a, b);
+        assert_eq!(target_of(Path::new("net.mlmodel"), dir).unwrap(), Path::new("/models/net.mlmodelc"));
+        // a file that is not named .mlmodel keeps its whole name
+        assert_eq!(target_of(Path::new("net.bin"), dir).unwrap(), Path::new("/models/net.bin.mlmodelc"));
+        assert!(target_of(Path::new(""), dir).is_err());
+        assert!(target_of(Path::new(".mlmodel"), dir).is_err());
+    }
 }

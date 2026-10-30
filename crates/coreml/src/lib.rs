@@ -67,8 +67,9 @@ pub const fn supported() -> bool {
     cfg!(target_os = "macos")
 }
 
-/// Compile the model at `source` (a `.mlmodel` file) into `dest_dir`, as `<name>.mlmodelc`, and return its path.
-/// Takes seconds for a large model: run it off the UI thread. An existing compiled model of the name is replaced.
+/// Compile the model at `source` (a `.mlmodel` file) into `dest_dir`, as `<file name without .mlmodel>.mlmodelc`, and
+/// return its path. Takes seconds for a large model: run it off the UI thread. A compiled model already there under
+/// that name (the same source file name) is replaced.
 pub fn compile(source: &Path, dest_dir: &Path) -> Result<PathBuf, Error> {
     imp::compile(source, dest_dir)
 }
@@ -99,6 +100,7 @@ impl Model {
 mod tests {
     use super::*;
 
+    /// A fresh empty folder for a test.
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("lc-coreml-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -106,6 +108,7 @@ mod tests {
         dir
     }
 
+    /// Test: a missing model is an error.
     #[test]
     fn a_missing_model_is_an_error() {
         let dir = scratch("missing");
@@ -114,6 +117,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Test: a file that is not a model is an error not a crash.
     #[test]
     fn a_file_that_is_not_a_model_is_an_error_not_a_crash() {
         let dir = scratch("garbage");
