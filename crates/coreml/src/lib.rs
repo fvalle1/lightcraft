@@ -12,6 +12,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod layout;
+pub mod mil;
 
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
@@ -37,6 +38,8 @@ pub enum Error {
     Load(String),
     #[error("{0}")]
     Input(String),
+    #[error("could not write the model: {0}")]
+    Build(String),
     #[error("the model's answer could not be used: {0}")]
     Output(String),
 }
@@ -67,7 +70,7 @@ pub const fn supported() -> bool {
     cfg!(target_os = "macos")
 }
 
-/// Compile the model at `source` (a `.mlmodel` file) into `dest_dir`, as `<file name without .mlmodel>.mlmodelc`, and
+/// Compile the model at `source` (a `.mlmodel` file or a `.mlpackage` folder, see [`mil`]) into `dest_dir`, as `<file name without the suffix>.mlmodelc`, and
 /// return its path. Takes seconds for a large model: run it off the UI thread. A compiled model already there under
 /// that name (the same source file name) is replaced.
 pub fn compile(source: &Path, dest_dir: &Path) -> Result<PathBuf, Error> {

@@ -35,11 +35,11 @@ fn sizes(array: &NSArray<NSNumber>) -> Result<Vec<usize>, Error> {
     array.to_vec().iter().map(|n| usize::try_from(n.as_isize()).map_err(|_| Error::Output("a negative size or stride".into()))).collect()
 }
 
-/// Where the compiled model of `source` is kept in `dest_dir`: `<file name without .mlmodel>.mlmodelc`. Only the
-/// `.mlmodel` suffix goes, so `model.v2.mlmodel` and `model.v3.mlmodel` keep apart.
+/// Where the compiled model of `source` is kept in `dest_dir`: `<file name without .mlmodel or .mlpackage>.mlmodelc`.
+/// Only that suffix goes, so `model.v2.mlmodel` and `model.v3.mlmodel` keep apart.
 fn target_of(source: &Path, dest_dir: &Path) -> Result<PathBuf, Error> {
     let name = source.file_name().and_then(|n| n.to_str()).ok_or_else(|| Error::Input("the model has no usable file name".into()))?;
-    let stem = name.strip_suffix(".mlmodel").unwrap_or(name);
+    let stem = name.strip_suffix(".mlmodel").or_else(|| name.strip_suffix(".mlpackage")).unwrap_or(name);
     if stem.is_empty() {
         return Err(Error::Input("the model has no file name".into()));
     }
