@@ -3951,6 +3951,7 @@ version = "0.15.0"
 dependencies = [
  "candle-core",
  "candle-nn",
+ "lightcraft-coreml",
  "lightcraft-fetch",
  "lightcraft-testkit",
  "log",

@@ -155,12 +155,18 @@ impl Vit {
         })
     }
 
-    /// `pixels`: `[1, 3, 1008, 1008]` normalized to −1..1. Returns `[1, 1024, 72, 72]`.
-    pub fn forward(&self, pixels: &Tensor) -> Result<Tensor> {
+    /// The patch embedding, position table and first norm of `pixels` (`[1, 3, 1008, 1008]`, −1..1):
+    /// `[1, 72, 72, 1024]`, the input of the first layer.
+    pub fn embed(&self, pixels: &Tensor) -> Result<Tensor> {
         let x = self.patch.forward(pixels)?; // [1, C, 72, 72]
         let b = x.dim(0)?;
         let x = x.flatten_from(2)?.transpose(1, 2)?.broadcast_add(&self.pos)?;
-        let mut x = self.ln_pre.forward(&x.reshape((b, GRID, GRID, HIDDEN))?)?;
+        Ok(self.ln_pre.forward(&x.reshape((b, GRID, GRID, HIDDEN))?)?)
+    }
+
+    /// `pixels`: `[1, 3, 1008, 1008]` normalized to −1..1. Returns `[1, 1024, 72, 72]`.
+    pub fn forward(&self, pixels: &Tensor) -> Result<Tensor> {
+        let mut x = self.embed(pixels)?;
         for l in &self.layers {
             let rope = if l.window > 0 { &self.rope_window } else { &self.rope_global };
             x = l.forward(&x, rope)?;
