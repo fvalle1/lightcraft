@@ -29,6 +29,8 @@
 #[cfg(not(target_arch = "wasm32"))]
 mod clip;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod coreml_vit;
+#[cfg(not(target_arch = "wasm32"))]
 mod detector;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod fetch;
@@ -68,6 +70,9 @@ pub enum Error {
     #[cfg(not(target_arch = "wasm32"))]
     #[error(transparent)]
     Candle(#[from] candle_core::Error),
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error(transparent)]
+    CoreMl(#[from] lightcraft_coreml::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -182,6 +187,14 @@ impl Sam3 {
     /// An [`Encoded`] from backbone features computed elsewhere: `[1, 1024, 72, 72]`, as the backbone gives.
     pub fn encoded_from(&self, backbone: Tensor) -> Encoded {
         Encoded { backbone, tracker: None, detector: None }
+    }
+
+    /// Writes the backbone's layers as a Core ML package in `dir` (see [`coreml_vit`]); returns its path and the name
+    /// of the model's output. Reads the backbone's weights only (about 1.3 GB of the checkpoint's 3.4 GB); run it off the
+    /// UI thread.
+    pub fn write_coreml_backbone(&self, dir: &Path) -> Result<(PathBuf, String)> {
+        let vb = Self::vb(&self.weights, &Device::Cpu).pp("detector_model.vision_encoder.backbone");
+        coreml_vit::write_backbone(&vb, &coreml_vit::Dims::SAM3, dir)
     }
 
     fn tracker_parts(&mut self) -> Result<(&neck::Neck, &tracker::Tracker)> {
