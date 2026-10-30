@@ -266,6 +266,11 @@ impl Sam3 {
         self.ane.status()
     }
 
+    /// A handle to read the Neural Engine path's status from another thread (it outlives the model).
+    pub fn neural_engine_handle(&self) -> Arc<ane::NeuralEngine> {
+        Arc::clone(&self.ane)
+    }
+
     /// The first layer's input for preprocessed pixels `[1, 3, 1008, 1008]` (−1..1): `[1, 72, 72, 1024]`.
     pub fn embed_pixels(&self, pixels: &Tensor) -> Result<Tensor> {
         self.backbone.embed(&pixels.to_device(&self.device)?)
