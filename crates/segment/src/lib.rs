@@ -27,6 +27,8 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 #[cfg(not(target_arch = "wasm32"))]
+pub mod ane;
+#[cfg(not(target_arch = "wasm32"))]
 mod clip;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod coreml_vit;
@@ -118,6 +120,10 @@ pub struct Sam3 {
     tracker: Option<tracker::Tracker>,
     detector: Option<detector::Detector>,
     tokenizer: Option<tokenizer::Tokenizer>,
+    /// The Neural Engine's backbone, when it is set up and checked (see [`ane`]).
+    ane: Arc<ane::NeuralEngine>,
+    /// The fastest backbone candle has run here (ms): what the Neural Engine is compared with.
+    candle_ms: std::sync::Mutex<Option<f64>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -155,7 +161,18 @@ impl Sam3 {
         }
         let weights = weights::Weights::open(&dir.join(WEIGHTS_FILE))?;
         let backbone = vit::Vit::new(Self::vb(&weights, &device).pp("detector_model.vision_encoder.backbone"))?;
-        Ok(Self { dir: dir.to_path_buf(), device, weights, backbone, tracker_neck: None, tracker: None, detector: None, tokenizer: None })
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            device,
+            weights,
+            backbone,
+            tracker_neck: None,
+            tracker: None,
+            detector: None,
+            tokenizer: None,
+            ane: Arc::default(),
+            candle_ms: std::sync::Mutex::new(None),
+        })
     }
 
     fn vb<'a>(w: &Arc<weights::Weights>, device: &Device) -> VarBuilder<'a> {
@@ -174,9 +191,79 @@ impl Sam3 {
         self.encode_pixels(&pixels)
     }
 
-    /// Run the backbone on preprocessed pixels `[1, 3, 1008, 1008]` (−1..1).
+    /// Run the backbone on preprocessed pixels `[1, 3, 1008, 1008]` (−1..1): on the Neural Engine when it was set up
+    /// ([`Sam3::start_neural_engine`]) and checked against candle, else (or when it fails) with candle.
     pub fn encode_pixels(&self, pixels: &Tensor) -> Result<Encoded> {
-        Ok(Encoded { backbone: self.backbone.forward(&pixels.to_device(&self.device)?)?, tracker: None, detector: None })
+        let warm = self.candle_ms.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_some();
+        let backbone = match self.ane.plan(warm) {
+            ane::Plan::Candle => self.candle_backbone(pixels)?,
+            ane::Plan::Ane(r) => match self.ane_backbone(&r, pixels) {
+                Ok(t) => t,
+                Err(why) => {
+                    self.ane.fell_back(&why);
+                    self.candle_backbone(pixels)?
+                }
+            },
+            ane::Plan::Check(r) => {
+                let candle = self.candle_backbone(pixels)?;
+                self.check_neural_engine(&r, pixels, &candle);
+                candle
+            }
+        };
+        Ok(Encoded { backbone, tracker: None, detector: None })
+    }
+
+    /// The backbone on candle's device, timed (the fastest time is kept).
+    fn candle_backbone(&self, pixels: &Tensor) -> Result<Tensor> {
+        let t = std::time::Instant::now();
+        let out = self.backbone.forward(&pixels.to_device(&self.device)?)?;
+        self.device.synchronize()?;
+        let ms = t.elapsed().as_secs_f64() * 1000.0;
+        let mut best = self.candle_ms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *best = Some(best.map_or(ms, |b| b.min(ms)));
+        Ok(out)
+    }
+
+    /// The backbone on the Neural Engine: candle's embedding of the pixels in, `[1, 1024, 72, 72]` out.
+    fn ane_backbone(&self, r: &ane::Ready, pixels: &Tensor) -> std::result::Result<Tensor, String> {
+        let e = |e: candle_core::Error| e.to_string();
+        let embedded = self.backbone.embed(&pixels.to_device(&self.device).map_err(e)?).map_err(|e| e.to_string())?;
+        let input = embedded.flatten_all().map_err(e)?.to_vec1::<f32>().map_err(e)?;
+        let out = r.run(&[1, vit::GRID * vit::GRID, vit::HIDDEN], &input)?;
+        Tensor::from_vec(out, (1, vit::GRID, vit::GRID, vit::HIDDEN), &self.device).and_then(|t| t.permute((0, 3, 1, 2))?.contiguous()).map_err(e)
+    }
+
+    /// Runs `pixels` through the Neural Engine too and records how it did against `candle` (the answer in use).
+    fn check_neural_engine(&self, r: &ane::Ready, pixels: &Tensor, candle: &Tensor) {
+        let candle_ms = self.candle_ms.lock().unwrap_or_else(std::sync::PoisonError::into_inner).unwrap_or(f64::INFINITY);
+        let run = || -> std::result::Result<(Tensor, f64), String> {
+            let t = std::time::Instant::now();
+            let out = self.ane_backbone(r, pixels)?;
+            Ok((out, t.elapsed().as_secs_f64() * 1000.0))
+        };
+        let outcome = run().and_then(|(first, t1)| {
+            // the first run on a freshly loaded model is slower: time the second
+            let (_, t2) = run()?;
+            let (a, b) = (first.flatten_all().map_err(|e| e.to_string())?, candle.flatten_all().map_err(|e| e.to_string())?);
+            let (a, b) = (a.to_vec1::<f32>().map_err(|e| e.to_string())?, b.to_vec1::<f32>().map_err(|e| e.to_string())?);
+            Ok((ane::cosine(&a, &b), t1.min(t2)))
+        });
+        match outcome {
+            Ok((cosine, ane_ms)) => r.judge(ane_ms, candle_ms, cosine),
+            Err(why) => self.ane.fell_back(&why),
+        }
+    }
+
+    /// Starts setting up the Neural Engine's backbone in `cache` on its own thread (see [`ane`]): nothing waits for it
+    /// and nothing changes until it is ready and has been checked against candle on a photo. Does nothing where there
+    /// is no Neural Engine, and after the first call.
+    pub fn start_neural_engine(&self, cache: &Path) {
+        self.ane.start(self.weights.clone(), cache.to_path_buf());
+    }
+
+    /// Where the Neural Engine path stands.
+    pub fn neural_engine(&self) -> ane::Status {
+        self.ane.status()
     }
 
     /// The first layer's input for preprocessed pixels `[1, 3, 1008, 1008]` (−1..1): `[1, 72, 72, 1024]`.
