@@ -24,13 +24,13 @@ const GLOBAL: [usize; 4] = [7, 15, 23, 31];
 const PRETRAIN_GRID: usize = 336 / PATCH;
 const EPS: f64 = 1e-6;
 
-/// Cosine and sine tables `[N, head_dim]` for a `side × side` grid whose coordinates are scaled
-/// by `scale` (`Sam3ViTRotaryEmbedding`: x frequencies then y, each duplicated pairwise).
-fn rope_tables(side: usize, scale: f64, device: &Device) -> Result<(Tensor, Tensor)> {
-    let spatial = HEAD_DIM / 2;
+/// Cosine and sine tables `[N, head_dim]` (row-major) for a `side × side` grid whose coordinates are scaled by
+/// `scale` (`Sam3ViTRotaryEmbedding`: x frequencies then y, each duplicated pairwise).
+pub(crate) fn rope_values(side: usize, scale: f64, head_dim: usize) -> (Vec<f32>, Vec<f32>) {
+    let spatial = head_dim / 2;
     let inv: Vec<f64> = (0..spatial).step_by(2).map(|i| 1.0 / 10000f64.powf(i as f64 / spatial as f64)).collect();
     let n = side * side;
-    let (mut cos, mut sin) = (Vec::with_capacity(n * HEAD_DIM), Vec::with_capacity(n * HEAD_DIM));
+    let (mut cos, mut sin) = (Vec::with_capacity(n * head_dim), Vec::with_capacity(n * head_dim));
     for r in 0..side {
         for c in 0..side {
             let (x, y) = (c as f64 * scale, r as f64 * scale);
@@ -44,6 +44,12 @@ fn rope_tables(side: usize, scale: f64, device: &Device) -> Result<(Tensor, Tens
             }
         }
     }
+    (cos, sin)
+}
+
+fn rope_tables(side: usize, scale: f64, device: &Device) -> Result<(Tensor, Tensor)> {
+    let (cos, sin) = rope_values(side, scale, HEAD_DIM);
+    let n = side * side;
     Ok((Tensor::from_vec(cos, (n, HEAD_DIM), device)?, Tensor::from_vec(sin, (n, HEAD_DIM), device)?))
 }
 

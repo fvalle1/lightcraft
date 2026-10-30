@@ -67,6 +67,11 @@ pub struct Val {
 }
 
 impl Val {
+    /// The value's name in the program (what the loaded model calls an output).
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     /// The tensor's shape.
     pub fn shape(&self) -> &[usize] {
         &self.shape

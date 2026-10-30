@@ -1,5 +1,6 @@
 //! Compares SAM 3 masks made from the candle backbone with masks made from a Core ML backbone (an experiment):
-//! `sam3_agree <model dir> <backbone.mlmodelc> <image.rgb> <w> <h> [cpu|gpu|ane]`.
+//! `sam3_agree <model dir> <backbone.mlmodelc | build:<scratch dir>> <image.rgb> <w> <h> [cpu|gpu|ane]`: `build:` writes
+//! and compiles the backbone from the checkpoint in Rust (the compiled model is kept in the scratch dir).
 
 use candle_core::{D, Tensor};
 use lightcraft_coreml::{ComputeUnits, Model};
@@ -27,7 +28,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => ComputeUnits::CpuAndNeuralEngine,
     };
     let mut sam = Sam3::load(std::path::Path::new(&a[0]))?;
-    let core = Model::load(std::path::Path::new(&a[1]), units, "x", "add_127").map_err(|e| format!("{e:?}"))?;
+    let (path, output) = match a[1].strip_prefix("build:") {
+        Some(scratch) => {
+            let scratch = std::path::Path::new(scratch);
+            let t = std::time::Instant::now();
+            let (package, output) = sam.write_coreml_backbone(&scratch.join("backbone.mlpackage"))?;
+            eprintln!("wrote the package in {:?} (output {output})", t.elapsed());
+            let t = std::time::Instant::now();
+            let compiled = lightcraft_coreml::compile(&package, scratch).map_err(|e| format!("{e:?}"))?;
+            eprintln!("compiled in {:?}", t.elapsed());
+            (compiled, output)
+        }
+        // a compiled model, with the name of its output after a `#` when it is not the one coremltools gave
+        None => match a[1].split_once('#') {
+            Some((path, output)) => (std::path::PathBuf::from(path), output.to_string()),
+            None => (std::path::PathBuf::from(&a[1]), "add_127".to_string()),
+        },
+    };
+    let t = std::time::Instant::now();
+    let core = Model::load(&path, units, "x", &output).map_err(|e| format!("{e:?}"))?;
+    eprintln!("loaded in {:?}", t.elapsed());
     let rgb = std::fs::read(&a[2])?;
     let pixels = Tensor::from_vec(mask::preprocess(&rgb, w, h, INPUT)?, (1, 3, INPUT, INPUT), sam.device())?;
 
