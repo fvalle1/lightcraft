@@ -149,7 +149,7 @@ of it.
   data, and writes `target/ci/report.json` and `target/ci/summary.md` (Markdown for a PR).
 
 ## Map of the code
-`geom`, `color`, `raster`, `tiff` (L0) → `raw`, `codecs`, `meta`, `develop` (L1) → `pipeline` → `catalog` → `engine`
+`geom`, `color`, `raster`, `tiff`, `sysmem`, `coreml` (L0) → `raw`, `codecs`, `meta`, `develop` (L1) → `pipeline` → `catalog` → `engine`
 → `ui-egui`, `mcp` (L5) → apps `lightcraft` (desktop), `lightcraft-cli` (render/commands/MCP). `scenes` generates demo
 photos. `xtask` = tooling (`ci`, `layers`, `assets`, `parity`, `wasm`, `corpus`, `stats`); `testkit` = test helpers
 (dev-dependency only). `flake.nix` +
