@@ -121,6 +121,9 @@ fn identify(path: &Path, c: &str, sha_known: Option<&str>) -> Result<Source> {
         && let Some(bytes) = read_capped(&sibling, MAX_MANIFEST_BYTES)
     {
         let m = manifest::parse(&bytes).map_err(|e| bad(c, format!("{}: {e}", sibling.display())))?;
+        if m.id == lightcraft_denoise::builtin::ID {
+            return Err(bad(c, "the id `builtin` is LightCraft's own denoiser: give the model another id in its denoise-model.json"));
+        }
         return Ok(Source { manifest: m, entry: None, file_name });
     }
     Err(bad(
@@ -672,7 +675,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "AI Denoise",
             [],
             None,
-            "{id?: photoId, enabled?: bool} → {id, enabled, amount} — turn AI Denoise on (50% initially) or off for one raw photo, independent of selection and Auto Sync; needs an installed model to turn on",
+            "{id?: photoId, enabled?: bool} → {id, enabled, amount} — turn AI Denoise on (50% initially) or off for one raw photo, independent of selection and Auto Sync; uses the built-in denoiser when no model is chosen",
             always,
             toggle
         ),
