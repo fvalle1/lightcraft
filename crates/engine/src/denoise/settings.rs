@@ -1,6 +1,6 @@
-use super::gpu::{ANE_SETUP_MARKER, GPU_SETUP_MARKER};
 #[cfg(feature = "denoise")]
 use super::builtin::{builtin_marker, forget_builtin_card};
+use super::gpu::{ANE_SETUP_MARKER, GPU_SETUP_MARKER};
 use super::model::RunOn;
 use super::{DenoiserManifest, Deserialize, Duration, Path, PathBuf, Serialize, Value};
 

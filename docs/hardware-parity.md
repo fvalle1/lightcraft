@@ -1,6 +1,6 @@
 # Hardware parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-20 · **Change:** minor (monitor profile from Windows Color System on Windows); previously major (created from the code, gpu-pipeline.md and the parity checklist) · **Target:** Adobe Lightroom Classic 15.5 / Lightroom 9.6
+> **Last reviewed:** 2026-10-10 · **Target:** Adobe Lightroom Classic 15.5 / Lightroom 9.6 · **Changes:** [revision history](#revision-history)
 
 What Lightroom does with the machine's hardware, per platform, and what LightCraft does. Sources:
 [gpu-pipeline.md](gpu-pipeline.md), [display-profiles.md](display-profiles.md), [denoise.md](denoise.md),
@@ -27,7 +27,8 @@ What Lightroom does with the machine's hardware, per platform, and what LightCra
 
 **~40% ready** (estimated): the GPU editing path is real and fast (measured: 24 MP exposure drag
 3.9 ms on GPU vs 22–42 ms CPU; NR drag 18 ms vs 301–471 ms), but HDR display, pen pressure,
-tethering, printing, per-monitor profiles on Linux and neural-engine inference are missing. GPU
+tethering, printing and per-monitor profiles on Linux are missing. AI denoise runs on the Neural Engine; the
+Neural Engine work still missing is SAM 3 and face processing. GPU
 correctness is proven on Apple GPUs and on one AMD GPU on Linux (Radeon 8060S, Vulkan / RADV: the
 equivalence suite passes with the same max 1–2 LSB as on Metal, [gpu-pipeline.md](gpu-pipeline.md#correctness-cpu-oracle-and-equivalence-tests)).
 NVIDIA, Intel and Windows DX12 still rely on user reports.
@@ -42,13 +43,14 @@ NVIDIA, Intel and Windows DX12 still rely on user reports.
 | Remaining stages on GPU (defringe, spot removal, masks) | 10–20 | |
 | Tethered capture (PTP over USB in pure Rust, Canon / Nikon / Sony first) | 25–45 | cameras (human) |
 | Printing with colour management | 15–25 | printers (human) |
-| Neural-engine / DirectML inference for AI features | 10–20 | depends on the AI model decision |
-| **Total** | **75–142 h** (the core set for beta, HDR display + monitor profile + pen pressure: 15–32 h) | |
+| Neural-engine inference for the other AI features (SAM 3, faces) and DirectML | 8–16 | depends on the AI model decision; denoise on the Neural Engine is done |
+| **Total** | **73–138 h** (the core set for beta, HDR display + monitor profile + pen pressure: 15–32 h) | |
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-05 | minor | Score: AI denoise on the Neural Engine is no longer listed as missing; SAM 3 and faces remain |
 | 2026-10-30 | minor | AI Denoise runs on the Apple Neural Engine through Core ML (`crates/coreml`, the model rewritten in pure Rust with an exact fp16 rescale); AI row updated, remaining hours revised |
 | 2026-10-20 | minor | Monitor profile: Windows reads the window's monitor profile from Windows Color System (`crates/wincolor`), sRGB while Windows colour-manages the desktop; verified on Windows 11 by setting and clearing a Display P3 profile while the app ran. Remaining monitor-profile work 4–8 h → 2–4 h |
 | 2026-10-12 | minor | Monitor profile: Linux reads the display profile from colord; macOS row reflects #787 |
